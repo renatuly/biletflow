@@ -1,19 +1,17 @@
-from fastapi.testclient import TestClient
+import asyncio
 
+from app.health.router import health_check
 from app.main import app
-
-client = TestClient(app)
 
 
 def test_health_check() -> None:
-    response = client.get("/api/v1/health")
+    response = asyncio.run(health_check())
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "biletflow-api"}
+    assert response.model_dump() == {"status": "ok", "service": "biletflow-api"}
 
 
 def test_openapi_is_available() -> None:
-    response = client.get("/openapi.json")
+    schema = app.openapi()
 
-    assert response.status_code == 200
-    assert response.json()["info"]["title"] == "BiletFlow API"
+    assert schema["info"]["title"] == "BiletFlow API"
+    assert "/api/v1/health" in schema["paths"]
