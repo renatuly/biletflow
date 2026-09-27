@@ -1,12 +1,17 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, UUIDTimestampMixin
+
+if TYPE_CHECKING:
+    from app.tickets.models import TicketType
+    from app.users.models import User
 
 
 class EventStatus(StrEnum):
@@ -64,6 +69,18 @@ class Event(UUIDTimestampMixin, Base):
     admission_type: Mapped[str] = mapped_column(String(30), default="general_admission")
     refund_policy: Mapped[str] = mapped_column(Text, default="No refunds")
     paid_sales_status: Mapped[str] = mapped_column(String(30), default=PaidSalesStatus.NOT_READY)
+    venue: Mapped["Venue"] = relationship(lazy="selectin")
+    organizer: Mapped["User"] = relationship(lazy="selectin")
+    ticket_types: Mapped[list["TicketType"]] = relationship(lazy="selectin")
+
+    @property
+    def organizer_name(self) -> str:
+        return self.organizer.full_name or "Organizer"
+
+    @property
+    def available_ticket_types(self):
+        return [item for item in self.ticket_types if not item.is_hidden]
+
     activation_fee_paid: Mapped[bool] = mapped_column(Boolean, default=False)
     paid_terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

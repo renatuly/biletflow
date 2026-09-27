@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.dependencies import current_user
 from app.events.models import Event, StaffAssignment, Venue
+from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
 from app.tickets.models import CheckInRecord, Ticket, TicketStatus, TicketType
 from app.tickets.schemas import TicketRead, TicketTypeCreate, TicketTypeRead
@@ -84,7 +85,7 @@ async def my_tickets(user: User = Depends(current_user), db: Session = Depends(g
 
 @router.get("/tickets/{ticket_id}", response_model=TicketRead)
 def read_ticket(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    ticket = db.get(Ticket, UUID(ticket_id))
+    ticket = db.get(Ticket, ticket_id)
     if not ticket:
         raise HTTPException(404, detail="Ticket not found")
     event = db.get(Event, ticket.event_id)
@@ -109,6 +110,14 @@ def authorized_ticket(db: Session, ticket_id: UUID, user: User) -> tuple[Ticket,
     ):
         raise HTTPException(403, detail="Not authorized")
     return ticket, event
+
+
+@router.get("/tickets/{ticket_id}/event", response_model=EventRead)
+def ticket_event(
+    ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    _, event = authorized_ticket(db, ticket_id, user)
+    return event
 
 
 @router.get("/tickets/{ticket_id}/qr")
@@ -183,7 +192,7 @@ def assigned_event(db: Session, event_id: UUID, user: User) -> Event:
     return event
 
 
-@router.get("/check-in/events")
+@router.get("/check-in/events", response_model=list[EventRead])
 def checkin_events(user: User = Depends(current_user), db: Session = Depends(get_db)):
     ids = select(StaffAssignment.event_id).where(StaffAssignment.user_id == user.id)
     return list(
@@ -209,7 +218,7 @@ def validate_admission(
             if not qr_payload.startswith("ticket.")
             else "INVALID_QR",
         }
-    ticket = db.get(Ticket, UUID(ticket_id))
+    ticket = db.get(Ticket, ticket_id)
     if not ticket or ticket.event_id != event_id:
         return {"result": "wrong_event"}
     mapping = {

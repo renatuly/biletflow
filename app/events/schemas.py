@@ -3,11 +3,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.tickets.schemas import TicketTypeRead
+
 
 class VenueWrite(BaseModel):
     name: str = Field(min_length=2, max_length=250)
     address: str = Field(min_length=3, max_length=500)
     city: str = "Almaty"
+
+
+class VenueRead(VenueWrite):
+    model_config = ConfigDict(from_attributes=True)
 
 
 class EventCreate(BaseModel):
@@ -55,6 +61,9 @@ class EventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     organizer_id: UUID
+    organizer_name: str
+    venue: VenueRead
+    available_ticket_types: list[TicketTypeRead]
     venue_id: UUID
     title: str
     description: str

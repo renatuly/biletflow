@@ -49,6 +49,7 @@ class TicketRead(BaseModel):
     id: UUID
     event_id: UUID
     ticket_type_id: UUID
+    qr_credential: str
     attendee_name: str
     attendee_email: str
     status: str

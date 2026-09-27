@@ -8,10 +8,12 @@ from app.campaigns.models import Campaign
 from app.core.database import get_db
 from app.core.dependencies import current_user, require_role
 from app.events.models import Event
+from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
 from app.orders.models import Order, Refund
 from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import User, UserRole
+from app.users.schemas import UserRead
 
 router = APIRouter(tags=["analytics", "administration"])
 
@@ -108,7 +110,7 @@ def campaign_analytics(
     ]
 
 
-@router.get("/admin/users")
+@router.get("/admin/users", response_model=list[UserRead])
 def admin_users(
     q: str | None = None,
     admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)),
@@ -137,7 +139,7 @@ def suspend_user(
     return {"status": "suspended"}
 
 
-@router.get("/admin/events")
+@router.get("/admin/events", response_model=list[EventRead])
 def admin_events(
     q: str | None = None,
     admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)),
