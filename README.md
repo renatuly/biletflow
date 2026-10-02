@@ -20,6 +20,17 @@ Copy `.env.example` to `.env` before changing local settings. The API will be
 available at `http://127.0.0.1:8000`, with interactive
 documentation at `/docs`.
 
+To create an idempotent local dataset with attendee, organizer, check-in staff,
+and administrator accounts, multiple event categories and venues, ticket types,
+registrations, revenue, and attendee ticket history, run:
+
+```bash
+python -m app.dev_seed
+```
+
+All demo accounts use `DemoPass123!`; their email addresses are printed by the
+command. The seed refuses to run when `APP_ENV=production`.
+
 For PostgreSQL-based demonstration deployment:
 
 ```bash
