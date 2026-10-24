@@ -5,7 +5,7 @@ from app.events.models import AuditLog, Event, OrganizerProfile, StaffAssignment
 from app.orders.models import Order, OrderItem, Payment, Refund
 from app.support.models import SupportCase, SupportMessage
 from app.tickets.models import CheckInRecord, Ticket, TicketType
-from app.users.models import Notification, User
+from app.users.models import Notification, OrganizerApplication, User
 
 __all__ = [
     "AuditLog",
@@ -16,6 +16,7 @@ __all__ = [
     "Order",
     "OrderItem",
     "OrganizerProfile",
+    "OrganizerApplication",
     "Payment",
     "Refund",
     "StaffAssignment",

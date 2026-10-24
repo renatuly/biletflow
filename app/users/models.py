@@ -39,3 +39,14 @@ class Notification(UUIDTimestampMixin, Base):
     message: Mapped[str] = mapped_column(Text)
     data: Mapped[dict] = mapped_column(JSONB().with_variant(JSON(), "sqlite"), default=dict)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class OrganizerApplication(UUIDTimestampMixin, Base):
+    __tablename__ = "organizer_applications"
+
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), unique=True)
+    contact_name: Mapped[str] = mapped_column(String(200))
+    organization_name: Mapped[str] = mapped_column(String(200))
+    contact_phone: Mapped[str] = mapped_column(String(40))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
