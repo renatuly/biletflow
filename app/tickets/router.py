@@ -200,6 +200,48 @@ def checkin_events(user: User = Depends(current_user), db: Session = Depends(get
     )
 
 
+@router.get("/check-in/events/{event_id}/attendees")
+def event_attendance(
+    event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    assigned_event(db, event_id, user)
+    rows = db.execute(
+        select(Ticket, TicketType.name, CheckInRecord.id)
+        .join(TicketType, Ticket.ticket_type_id == TicketType.id)
+        .outerjoin(
+            CheckInRecord,
+            (CheckInRecord.ticket_id == Ticket.id) & CheckInRecord.reversed_at.is_(None),
+        )
+        .where(Ticket.event_id == event_id)
+        .order_by(Ticket.attendee_name, Ticket.id)
+    ).all()
+    return [
+        {
+            "id": str(ticket.id),
+            "attendee_name": ticket.attendee_name,
+            "attendee_email": ticket.attendee_email,
+            "status": ticket.status,
+            "ticket_type": name,
+            "record_id": str(record_id) if record_id else None,
+        }
+        for ticket, name, record_id in rows
+    ]
+
+
+@router.post("/check-in/events/{event_id}/tickets/{ticket_id}/admit")
+async def manual_admission(
+    event_id: UUID,
+    ticket_id: UUID,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    assigned_event(db, event_id, user)
+    ticket = db.get(Ticket, ticket_id)
+    if not ticket or ticket.event_id != event_id:
+        raise HTTPException(404, detail="Ticket not found for this event")
+    return await admit(event_id, ticket.qr_credential, "manual", user, db)
+
+
 @router.post("/check-in/events/{event_id}/validate")
 def validate_admission(
     event_id: UUID,
@@ -281,10 +323,13 @@ def reverse_checkin(
     record_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     record = db.get(CheckInRecord, record_id)
-    if not record or record.reversed_at:
+    if not record:
         raise HTTPException(404, detail="Active check-in not found")
     event = assigned_event(db, record.event_id, user)
     ticket = db.scalar(select(Ticket).where(Ticket.id == record.ticket_id).with_for_update())
+    db.refresh(record)
+    if record.reversed_at or ticket.status != TicketStatus.CHECKED_IN:
+        raise HTTPException(409, detail="Check-in is no longer active; refresh attendees")
     record.reversed_at = datetime.now(UTC)
     record.reversed_by = user.id
     ticket.status = TicketStatus.VALID
