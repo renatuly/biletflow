@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from app.tickets.schemas import TicketTypeRead
 
@@ -99,3 +99,7 @@ class OrganizerProfileRead(BaseModel):
     verification_status: str
     payout_account_masked: str | None
     payout_verified: bool
+
+
+class EventImageCreate(BaseModel):
+    url: HttpUrl

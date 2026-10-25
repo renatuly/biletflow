@@ -18,6 +18,7 @@ from app.events.models import (
 )
 from app.events.schemas import (
     EventCreate,
+    EventImageCreate,
     EventRead,
     EventUpdate,
     OrganizerProfileRead,
@@ -342,3 +343,24 @@ def event_history(
         }
         for x in logs
     ]
+
+
+@router.post("/events/{event_id}/images", response_model=EventRead)
+def attach_image(
+    event_id: UUID,
+    data: EventImageCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    event = require_event_manager(db, event_id, user)
+    if event.status != "draft":
+        raise HTTPException(409, detail="Only draft banners can be changed")
+    url = str(data.url)
+    current = event.images or []
+    if current and current[0] == url:
+        return event
+    event.images = [url, *[image for image in current if image != url]]
+    audit(db, user, event, "event.banner_attached", "event", event.id, "Updated event banner URL")
+    db.commit()
+    db.refresh(event)
+    return event
