@@ -119,3 +119,14 @@ Moderation/dispute decisions notify requesters but never implicitly refund an
 order or suspend an event. Those actions use existing explicit admin/organizer
 controls. All changes are scoped and audited. Run `pytest` for role, lifecycle,
 expiration, access, settings, notification and payout integration coverage.
+
+
+### Event reports through support
+
+The mobile attendee event details action creates an ordinary support case with
+`flow=attendee`, `category=report_event`, and the event ID. These cases route only
+to platform admins even though an event is attached: organizers and event staff
+cannot read, reply, assign, or receive notifications for them. An attendee role
+and accessible event context are required. The mobile app uses Support Chat and
+the admin platform inbox instead of separate report/dispute pages. Existing
+formal report/dispute records and APIs are retained for compatibility.

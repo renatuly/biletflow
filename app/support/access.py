@@ -27,7 +27,7 @@ def handles_event(db: Session, event: Event, user: User):
 def can_manage(db: Session, case: SupportCase, user: User):
     if admin(user):
         return True
-    if case.flow != "attendee" or not case.event_id:
+    if case.flow != "attendee" or not case.event_id or case.category == "report_event":
         return False
     event = db.get(Event, case.event_id)
     return bool(event and handles_event(db, event, user))
@@ -47,7 +47,7 @@ def visible_case(db, case_id, user, lock=False):
 
 def candidates(db: Session, case: SupportCase):
     users = list(db.scalars(select(User).where(User.is_active.is_(True))))
-    if case.flow == "organizer_platform" or not case.event_id:
+    if case.flow == "organizer_platform" or not case.event_id or case.category == "report_event":
         return [u for u in users if admin(u)]
     event = db.get(Event, case.event_id)
     return [u for u in users if event and handles_event(db, event, u)]

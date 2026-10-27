@@ -486,3 +486,74 @@ def test_hidden_sold_tickets_still_occupy_event_capacity(scenario):  # noqa: F81
     assert (
         client.post(base + f"/ticket-types/{v['kind']}/restore", headers=owner).status_code == 422
     )
+
+
+def test_event_report_support_is_private_and_routes_only_to_admins(scenario):  # noqa: F811
+    client, engine, v = scenario
+    ready(engine, v, free=True)
+    owner, buyer, staff, stranger = v["tokens"]
+    administrator = admin_headers(engine)
+    payload = {
+        "flow": "attendee",
+        "category": "report_event",
+        "event_id": v["event"],
+        "subject": "Misleading event",
+        "message": "Please check the advertised venue.",
+    }
+    result = client.post("/api/v1/support/cases", headers=buyer, json=payload)
+    assert result.status_code == 201, result.text
+    case = result.json()
+    assert case["routing"] == "platform" and case["assigned_to"] is None
+    case_path = f"/api/v1/support/cases/{case['id']}"
+    for headers in [owner, staff, stranger]:
+        assert client.get(case_path, headers=headers).status_code == 403
+        assert client.get(case_path + "/messages", headers=headers).status_code == 403
+        assert client.get(case_path + "/history", headers=headers).status_code == 403
+        assert (
+            client.post(
+                case_path + "/messages", headers=headers, json={"body": "Unauthorized reply"}
+            ).status_code
+            == 403
+        )
+    assert case["id"] in [
+        c["id"]
+        for c in client.get("/api/v1/support/cases?flow=attendee&view=mine", headers=buyer).json()
+    ]
+    assert case["id"] not in [
+        c["id"]
+        for c in client.get("/api/v1/support/cases?flow=attendee&view=inbox", headers=owner).json()
+    ]
+    assert case["id"] in [
+        c["id"]
+        for c in client.get(
+            "/api/v1/support/cases?flow=attendee&view=inbox", headers=administrator
+        ).json()
+    ]
+    candidates = client.get(case_path + "/assignees", headers=administrator).json()
+    assert len(candidates) == 1
+    assert (
+        client.patch(
+            case_path + "/assignee", headers=administrator, json={"user_id": str(v["owner_id"])}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            case_path + "/messages",
+            headers=administrator,
+            json={"body": "We are reviewing this report."},
+        ).status_code
+        == 201
+    )
+    assert client.post("/api/v1/support/cases", headers=owner, json=payload).status_code == 403
+    assert (
+        client.post(
+            "/api/v1/support/cases", headers=buyer, json={**payload, "event_id": None}
+        ).status_code
+        == 403
+    )
+    with Session(engine) as db:
+        notices = list(
+            db.scalars(select(Notification).where(Notification.kind == "support_request"))
+        )
+        assert notices and all(n.user_id != v["owner_id"] for n in notices)

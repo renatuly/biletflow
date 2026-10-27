@@ -29,6 +29,7 @@ from app.users.models import User
 
 router = APIRouter(prefix="/support", tags=["support"])
 ATTENDEE = {
+    "report_event",
     "ticket_delivery",
     "payment",
     "refund",
@@ -102,7 +103,9 @@ def case_data(db, case, user):
         "id": str(case.id),
         "number": "BF-" + case.id.hex[:12].upper(),
         "flow": case.flow,
-        "routing": "organizer" if case.flow == "attendee" and event else "platform",
+        "routing": "organizer"
+        if case.flow == "attendee" and event and case.category != "report_event"
+        else "platform",
         "requester_id": str(case.requester_id),
         "assigned_to": str(case.assigned_to) if case.assigned_to else None,
         "assignee_name": (assignee.full_name or assignee.email) if assignee else None,
@@ -284,6 +287,10 @@ def create_case(
     ):
         # A support agent can handle cases but cannot impersonate an attendee through this role.
         raise HTTPException(403, detail="Use the support inbox to handle attendee cases")
+    if data.category == "report_event" and (
+        "attendee" not in user.roles or not data.event_id or data.order_id or data.ticket_id
+    ):
+        raise HTTPException(403, detail="Event reports require an attendee and event context")
     if data.category not in (PLATFORM if platform else ATTENDEE):
         raise HTTPException(422, detail="Category does not belong to this support flow")
     if len(data.subject.strip()) < 3 or not data.message.strip():
@@ -339,7 +346,9 @@ def create_case(
         ticket_id=data.ticket_id,
         category=data.category,
         subject=data.subject.strip(),
-        assigned_to=event.organizer_id if event and not platform else None,
+        assigned_to=event.organizer_id
+        if event and not platform and data.category != "report_event"
+        else None,
         client_key=key,
         request_fingerprint=fingerprint,
         status="open",
