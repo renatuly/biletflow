@@ -88,7 +88,6 @@ def ticket_details(db: Session, ticket: Ticket):
     )
 
 
-
 @router.get("/tickets", response_model=list[TicketRead])
 async def my_tickets(user: User = Depends(current_user), db: Session = Depends(get_db)):
     tickets = list(
@@ -101,7 +100,7 @@ async def my_tickets(user: User = Depends(current_user), db: Session = Depends(g
 
 @router.get("/tickets/{ticket_id}", response_model=TicketRead)
 def read_ticket(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    ticket = db.get(Ticket, UUID(str(ticket_id)))
+    ticket = db.get(Ticket, ticket_id)
     if not ticket:
         raise HTTPException(404, detail="Ticket not found")
     event = db.get(Event, ticket.event_id)
@@ -115,7 +114,7 @@ def read_ticket(ticket_id: UUID, user: User = Depends(current_user), db: Session
 
 
 def authorized_ticket(db: Session, ticket_id: UUID, user: User) -> tuple[Ticket, Event]:
-    ticket = db.get(Ticket, UUID(str(ticket_id)))
+    ticket = db.get(Ticket, ticket_id)
     if not ticket:
         raise HTTPException(404, detail="Ticket not found")
     event = db.get(Event, ticket.event_id)
@@ -138,8 +137,8 @@ def ticket_event(
 
 @router.get("/tickets/{ticket_id}/qr")
 def ticket_qr(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    ticket, _ = authorized_ticket(db, ticket_id, user)
-    if ticket.status not in (
+    ticket, event = authorized_ticket(db, ticket_id, user)
+    if event.status == "cancelled" or ticket.status not in (
         TicketStatus.VALID,
         TicketStatus.CHECKED_IN,
     ):
@@ -155,7 +154,7 @@ async def ticket_pdf(
     ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     ticket, event = authorized_ticket(db, ticket_id, user)
-    if ticket.status not in (
+    if event.status == "cancelled" or ticket.status not in (
         TicketStatus.VALID,
         TicketStatus.CHECKED_IN,
     ):
@@ -283,7 +282,13 @@ def validate_admission(
 ):
     from app.core.security import parse_qr_credential
 
-    assigned_event(db, event_id, user)
+    event = assigned_event(db, event_id, user)
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
         return {
@@ -295,6 +300,8 @@ def validate_admission(
     ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket or ticket.event_id != event_id:
         return {"result": "wrong_event"}
+    if event.status == "cancelled":
+        return {"result": "cancelled", "reason": "EVENT_CANCELLED"}
     mapping = {
         TicketStatus.CANCELLED: "cancelled",
         TicketStatus.REFUNDED: "refunded",
@@ -318,6 +325,14 @@ async def admit(
     from app.core.security import parse_qr_credential
 
     event = assigned_event(db, event_id, user)
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if event.status == "cancelled":
+        raise HTTPException(409, detail="Event is cancelled; admission is closed")
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
         raise HTTPException(409, detail="Invalid admission QR")
@@ -363,13 +378,19 @@ def reverse_checkin(
     if not record:
         raise HTTPException(404, detail="Active check-in not found")
     event = assigned_event(db, record.event_id, user, "reverse_check_in")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     ticket = db.scalar(select(Ticket).where(Ticket.id == record.ticket_id).with_for_update())
     db.refresh(record)
     if record.reversed_at or ticket.status != TicketStatus.CHECKED_IN:
         raise HTTPException(409, detail="Check-in is no longer active; refresh attendees")
     record.reversed_at = datetime.now(UTC)
     record.reversed_by = user.id
-    ticket.status = TicketStatus.VALID
+    ticket.status = TicketStatus.CANCELLED if event.status == "cancelled" else TicketStatus.VALID
     audit(db, user, event, "ticket.check_in_reversed", "ticket", ticket.id, "Check-in reversed")
     db.commit()
     return {"status": "reversed"}

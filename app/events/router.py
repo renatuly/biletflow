@@ -25,8 +25,9 @@ from app.events.schemas import (
     OrganizerProfileWrite,
 )
 from app.events.service import audit, publish_event, require_event_manager
-from app.tickets.models import TicketType
-from app.users.models import User, UserRole
+from app.orders.models import Order
+from app.tickets.models import Ticket, TicketStatus, TicketType
+from app.users.models import Notification, User, UserRole
 
 router = APIRouter(tags=["events"])
 
@@ -97,6 +98,14 @@ async def publish(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     event = require_event_manager(db, event_id, user)
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can publish this event")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not db.scalar(select(TicketType).where(TicketType.event_id == event.id)):
         raise HTTPException(409, detail="Create at least one ticket type before publishing")
     return publish_event(db, event, user)
@@ -105,6 +114,10 @@ async def publish(
 @router.post("/events/{event_id}/unpublish", response_model=EventRead)
 def unpublish(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     event = require_event_manager(db, event_id, user)
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can unpublish this event")
+    if event.status == "cancelled":
+        raise HTTPException(409, detail="Cancelled events cannot be unpublished")
     event.status = "draft"
     audit(db, user, event, "event.unpublished", "event", event.id, "Event unpublished")
     db.commit()
@@ -115,11 +128,74 @@ def unpublish(event_id: UUID, user: User = Depends(current_user), db: Session = 
 @router.post("/events/{event_id}/cancel", response_model=EventRead)
 def cancel(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     event = require_event_manager(db, event_id, user)
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can cancel this event")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    was_cancelled = event.status == "cancelled"
     event.status = "cancelled"
     event.paid_sales_status = "suspended"
-    audit(
-        db, user, event, "event.cancelled", "event", event.id, "Event cancelled and sales stopped"
+    tickets = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.event_id == event.id)
+            .order_by(Ticket.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     )
+    changed = 0
+    for ticket in tickets:
+        if ticket.status == TicketStatus.VALID:
+            ticket.status = TicketStatus.CANCELLED
+            changed += 1
+    recipients = {t.owner_id for t in tickets if t.owner_id}
+    recipients.update(
+        db.scalars(
+            select(Order.user_id).where(
+                Order.event_id == event.id,
+                Order.user_id.is_not(None),
+                Order.status.in_(["confirmed", "partially_refunded", "refunded"]),
+            )
+        )
+    )
+    notified = {
+        n.user_id
+        for n in db.scalars(
+            select(Notification).where(
+                Notification.kind == "event_cancellation", Notification.user_id.in_(recipients)
+            )
+        )
+        if n.data.get("event_id") == str(event.id)
+    }
+    for user_id in recipients - notified:
+        db.add(
+            Notification(
+                user_id=user_id,
+                kind="event_cancellation",
+                title="Event cancelled",
+                message=(
+                    f"{event.title} has been cancelled. Your tickets cannot be used for admission. "
+                    "Refunds are handled separately; contact the organizer for help."
+                ),
+                data={"event_id": str(event.id)},
+            )
+        )
+    if not was_cancelled or changed:
+        audit(
+            db,
+            user,
+            event,
+            "event.cancelled",
+            "event",
+            event.id,
+            f"Event cancelled; sales stopped; {changed} unused tickets invalidated; "
+            "refunds separate",
+        )
     db.commit()
     db.refresh(event)
     return event

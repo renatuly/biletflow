@@ -21,7 +21,12 @@ def utc(value: datetime) -> datetime:
 
 def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
     now = datetime.now(UTC)
-    event = db.get(Event, data.event_id)
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == data.event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not event or event.status != "published":
         raise HTTPException(409, detail="Event is not available")
     if not (utc(event.registration_opens_at) <= now <= utc(event.registration_closes_at)):
@@ -104,11 +109,19 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
 
 def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Order:
     now = datetime.now(UTC)
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == order.event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     order = db.scalar(select(Order).where(Order.id == order.id).with_for_update())
     if order.status == OrderStatus.CONFIRMED:
         return order
     if order.status != OrderStatus.PENDING or utc(order.expires_at) < now:
         raise HTTPException(409, detail="Checkout session expired or closed")
+    if outcome != "failure" and (not event or event.status == "cancelled"):
+        raise HTTPException(409, detail="Event is cancelled; checkout cannot complete")
     items = list(db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all())
     type_ids = [item.ticket_type_id for item in items]
     types = {
