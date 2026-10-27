@@ -148,7 +148,7 @@ def admin_events(
     statement = select(Event)
     if q:
         statement = statement.where(Event.title.ilike(f"%{q}%"))
-    return list(db.scalars(statement.limit(100)).all())
+    return list(db.scalars(statement.order_by(Event.starts_at.desc())).all())
 
 
 @router.post("/admin/events/{event_id}/suspend")
@@ -185,4 +185,24 @@ def operations(
         "tickets": db.scalar(select(func.count(Ticket.id))) or 0,
         "currency": "KZT",
         "financial_data_is_simulated": True,
+    }
+
+
+@router.get("/admin/events/summary")
+def admin_event_summary(
+    admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)), db: Session = Depends(get_db)
+):
+    return {
+        "events_total": db.scalar(select(func.count(Event.id))) or 0,
+        "published_events": db.scalar(
+            select(func.count(Event.id)).where(Event.status == "published")
+        )
+        or 0,
+        "tickets_issued": db.scalar(select(func.count(Ticket.id))) or 0,
+        "confirmed_order_total_minor": db.scalar(
+            select(func.coalesce(func.sum(Order.total_minor), 0)).where(Order.status == "confirmed")
+        )
+        or 0,
+        "currency": "KZT",
+        "is_simulation": True,
     }

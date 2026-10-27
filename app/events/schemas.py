@@ -80,6 +80,7 @@ class EventRead(BaseModel):
     admission_type: str
     refund_policy: str
     paid_sales_status: str
+    paid_review_status: str = "not_applicable"
     created_at: datetime
 
 

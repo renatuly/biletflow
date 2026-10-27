@@ -54,6 +54,10 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
             raise HTTPException(409, detail="TICKET_INVENTORY_EXHAUSTED")
         if ticket_type.kind == "paid" and event.paid_sales_status != "active":
             raise HTTPException(409, detail="Paid sales are not active")
+        if ticket_type.kind == "paid":
+            from app.events.paid_applications import require_approval
+
+            require_approval(db, event)
         subtotal += ticket_type.price_minor * request_item.quantity
     campaign = None
     discount = 0
@@ -130,6 +134,10 @@ def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Or
             select(TicketType).where(TicketType.id.in_(type_ids)).with_for_update()
         ).all()
     }
+    if outcome != "failure" and any(t.kind == "paid" for t in types.values()):
+        from app.events.paid_applications import require_approval
+
+        require_approval(db, event)
     if outcome == "failure":
         for item in items:
             types[item.ticket_type_id].reserved_count -= item.quantity

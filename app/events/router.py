@@ -12,7 +12,6 @@ from app.events.models import (
     AuditLog,
     Event,
     OrganizerProfile,
-    PaidSalesStatus,
     StaffAssignment,
     Venue,
 )
@@ -85,6 +84,18 @@ def update_event(
             select(TicketType.id).where(TicketType.event_id == event.id, TicketType.kind == "paid")
         ):
             raise HTTPException(422, detail="Paid events require a refund policy description")
+    from app.events.paid_applications import invalidate_review
+
+    def normalized(value):
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return value
+
+    if any(
+        normalized(getattr(event, f)) != normalized(v)
+        for f, v in data.model_dump(exclude_unset=True).items()
+    ):
+        invalidate_review(db, event, user)
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(event, field, value)
     audit(db, user, event, "event.updated", "event", event.id, "Event details updated")
@@ -307,10 +318,24 @@ def paid_sales_checklist(
         "activation_fee_paid": event.activation_fee_paid,
         "terms_accepted": event.paid_terms_accepted_at is not None,
     }
+    from app.events.paid_applications import application, fingerprint
+
+    review = application(db, event)
+    review_status = review.status if review else "not_submitted"
+    if (
+        review
+        and review.status in ("approved", "pending_review")
+        and review.snapshot_hash != fingerprint(db, event)
+    ):
+        review_status = "changes_required"
     return {
         "status": event.paid_sales_status,
         "checklist": checklist,
-        "can_activate": all(checklist.values()),
+        "can_activate": all(checklist.values())
+        and review_status not in ("pending_review", "approved")
+        and event.status == "draft",
+        "review_status": review_status,
+        "review_reason": review.reason if review else "",
         "is_simulation": True,
     }
 
@@ -348,26 +373,9 @@ def pay_activation_fee(
 def activate_paid_sales(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    event = require_event_manager(db, event_id, user)
-    profile = db.scalar(
-        select(OrganizerProfile).where(OrganizerProfile.user_id == event.organizer_id)
-    )
-    ready = (
-        event.activation_fee_paid
-        and event.paid_terms_accepted_at
-        and profile
-        and profile.verification_status == "verified"
-        and profile.payout_verified
-        and db.scalar(
-            select(TicketType).where(TicketType.event_id == event.id, TicketType.kind == "paid")
-        )
-    )
-    if not ready:
-        raise HTTPException(409, detail="Paid-sales activation checklist is incomplete")
-    event.paid_sales_status = PaidSalesStatus.ACTIVE
-    audit(db, user, event, "paid_sales.activated", "event", event.id, "Paid sales activated")
-    db.commit()
-    return {"status": event.paid_sales_status, "is_simulation": True}
+    from app.events.paid_applications import submit
+
+    return submit(db, event_id, user)
 
 
 @router.post("/events/{event_id}/staff", status_code=201)
@@ -438,6 +446,9 @@ def attach_image(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
+    from app.events.paid_applications import invalidate_review
+
+    invalidate_review(db, event, user)
     if event.status != "draft":
         raise HTTPException(409, detail="Only draft banners can be changed")
     url = str(data.url)

@@ -2,6 +2,7 @@
 
 from app.campaigns.models import Campaign, PromoRedemption
 from app.events.models import AuditLog, Event, OrganizerProfile, StaffAssignment, Venue
+from app.events.paid_applications import PaidEventApplication
 from app.orders.models import Order, OrderItem, Payment, Refund
 from app.support.models import SupportCase, SupportChange, SupportMessage
 from app.tickets.models import CheckInRecord, Ticket, TicketType
@@ -18,6 +19,7 @@ __all__ = [
     "OrganizerProfile",
     "OrganizerApplication",
     "Payment",
+    "PaidEventApplication",
     "Refund",
     "StaffAssignment",
     "Ticket",

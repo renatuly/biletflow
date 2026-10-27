@@ -58,6 +58,10 @@ def publish_event(db: Session, event: Event, user: User) -> Event:
     )
     if paid and not event.refund_policy.strip():
         raise HTTPException(422, detail="Paid events require a refund policy description")
+    if paid:
+        from app.events.paid_applications import require_approval
+
+        require_approval(db, event)
     event.status = "published"
     audit(db, user, event, "event.published", "event", event.id, "Event published")
     db.commit()

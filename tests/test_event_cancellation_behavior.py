@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from test_refund_support import scenario  # noqa: F401
 
 from app.events.models import Event
+from app.events.paid_applications import PaidEventApplication, fingerprint
 from app.orders.models import Order, Refund
 from app.tickets.models import CheckInRecord, Ticket
 from app.users.models import Notification
@@ -109,6 +110,14 @@ def test_cancelled_event_cannot_complete_an_existing_pending_checkout(scenario):
         event = db.get(Event, UUID(v["event"]))
         event.status = "published"
         event.paid_sales_status = "active"
+        db.add(
+            PaidEventApplication(
+                event_id=event.id,
+                status="approved",
+                snapshot_hash=fingerprint(db, event),
+                submitted_at=event.created_at,
+            )
+        )
         db.commit()
     started = client.post(
         "/api/v1/checkout/sessions",

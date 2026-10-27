@@ -50,6 +50,11 @@ async def create_ticket_type(
         raise HTTPException(409, detail="Cannot add tickets to cancelled event")
     if data.kind == "paid" and not event.refund_policy.strip():
         raise HTTPException(422, detail="Paid events require a refund policy description")
+    from app.events.paid_applications import invalidate_review
+
+    if data.kind == "paid" and event.status != "draft":
+        raise HTTPException(409, detail="Paid ticket types can only be added to a draft event")
+    invalidate_review(db, event, user)
     item = TicketType(event_id=event.id, **data.model_dump())
     db.add(item)
     db.flush()
@@ -70,6 +75,10 @@ def hide_ticket_type(
     item = db.get(TicketType, ticket_type_id)
     if not item or item.event_id != event.id:
         raise HTTPException(404, detail="Ticket type not found")
+    from app.events.paid_applications import invalidate_review
+
+    if not item.is_hidden:
+        invalidate_review(db, event, user)
     item.is_hidden = True
     audit(db, user, event, "ticket_type.hidden", "ticket_type", item.id, "Ticket type hidden")
     db.commit()

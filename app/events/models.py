@@ -81,6 +81,26 @@ class Event(UUIDTimestampMixin, Base):
     def available_ticket_types(self):
         return [item for item in self.ticket_types if not item.is_hidden]
 
+    @property
+    def paid_review_status(self) -> str:
+        if not any(t.kind == "paid" for t in self.ticket_types):
+            return "not_applicable"
+        from sqlalchemy.orm import object_session
+
+        from app.events.paid_applications import application, fingerprint
+
+        db = object_session(self)
+        if db is None:
+            return "not_submitted"
+        review = application(db, self)
+        if review is None:
+            return "not_submitted"
+        if review.status in ("approved", "pending_review") and review.snapshot_hash != fingerprint(
+            db, self
+        ):
+            return "changes_required"
+        return review.status
+
     activation_fee_paid: Mapped[bool] = mapped_column(Boolean, default=False)
     paid_terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
