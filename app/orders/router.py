@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,9 +19,12 @@ router = APIRouter(tags=["orders", "checkout"])
 
 @router.post("/checkout/sessions", response_model=OrderRead, status_code=201)
 async def start_checkout(
-    data: CheckoutCreate, user: User = Depends(current_user), db: Session = Depends(get_db)
+    data: CheckoutCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None),
 ):
-    return create_checkout(db, data, user)
+    return create_checkout(db, data, user, idempotency_key)
 
 
 @router.get("/checkout/sessions/{order_id}", response_model=OrderRead)
@@ -101,3 +104,35 @@ def refund_order(
         "currency": order.currency,
         "is_simulation": True,
     }
+
+
+@router.post("/checkout/sessions/{order_id}/cancel", response_model=OrderRead)
+def cancel_checkout(
+    order_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    order = db.get(Order, order_id)
+    if not order or order.user_id != user.id:
+        raise HTTPException(404, detail="Checkout not found")
+    db.scalar(select(Event).where(Event.id == order.event_id).with_for_update())
+    order = db.scalar(
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    from datetime import UTC, datetime
+
+    from app.orders.reservations import release
+    from app.platform.operations_service import utc
+
+    if order.status == "pending":
+        release(
+            db,
+            order,
+            "expired" if utc(order.expires_at) <= datetime.now(UTC) else "cancelled",
+            user,
+        )
+        db.commit()
+    elif order.status not in ("cancelled", "expired"):
+        raise HTTPException(409, detail="This checkout can no longer be abandoned")
+    return order

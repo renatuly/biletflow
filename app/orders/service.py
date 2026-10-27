@@ -1,12 +1,14 @@
+import hashlib
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.campaigns.models import Campaign, PromoRedemption
-from app.core.config import get_settings
 from app.core.security import create_qr_credential
 from app.events.models import Event
 from app.orders.models import Order, OrderItem, OrderStatus, Payment
@@ -19,8 +21,15 @@ def utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
+def create_checkout(
+    db: Session, data: CheckoutCreate, user: User, request_key: str | None = None
+) -> Order:
+    from app.orders.reservations import expire_event
+    from app.platform.operations_service import require_access
+
     now = datetime.now(UTC)
+    expire_event(db, data.event_id, now)
+    db.commit()
     event = db.scalar(
         select(Event)
         .where(Event.id == data.event_id)
@@ -31,7 +40,37 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
         raise HTTPException(409, detail="Event is not available")
     if not (utc(event.registration_opens_at) <= now <= utc(event.registration_closes_at)):
         raise HTTPException(409, detail="Registration is closed")
+    require_access(db, event, user, purchasing=True)
+
+    from app.platform.operations_models import CheckoutAttempt
+
+    fingerprint = hashlib.sha256(
+        json.dumps(data.model_dump(mode="json"), sort_keys=True).encode()
+    ).hexdigest()
+    if request_key:
+        if len(request_key) > 128 or not request_key.strip():
+            raise HTTPException(422, detail="Invalid Idempotency-Key")
+        previous = db.scalar(
+            select(CheckoutAttempt).where(
+                CheckoutAttempt.user_id == user.id, CheckoutAttempt.request_key == request_key
+            )
+        )
+        if previous:
+            if previous.fingerprint != fingerprint:
+                raise HTTPException(409, detail="This checkout key belongs to a different request")
+            previous_order = db.get(Order, previous.order_id)
+            if previous_order.status not in ("pending", "confirmed"):
+                raise HTTPException(409, detail="This reservation is closed. Start a new checkout")
+            return previous_order
     requested_ids = [item.ticket_type_id for item in data.items]
+    if len(set(requested_ids)) != len(requested_ids):
+        raise HTTPException(422, detail="Combine duplicate ticket types into one quantity")
+    if (
+        sum(i.quantity for i in data.items)
+        + sum(t.sold_count + t.reserved_count for t in event.ticket_types)
+        > event.capacity
+    ):
+        raise HTTPException(409, detail="Event capacity is exhausted")
     types = list(
         db.scalars(
             select(TicketType).where(TicketType.id.in_(requested_ids)).with_for_update()
@@ -79,8 +118,10 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
             if campaign.discount_type == "percentage"
             else min(subtotal, campaign.discount_value)
         )
-    settings = get_settings()
-    fee = (subtotal - discount) * settings.app_processing_fee_bps // 10_000 if subtotal else 0
+    from app.platform.operations_service import settings as current_settings
+
+    settings = current_settings(db)
+    fee = (subtotal - discount) * settings.processing_fee_bps // 10_000 if subtotal else 0
     order = Order(
         event_id=event.id,
         user_id=user.id,
@@ -90,9 +131,24 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
         discount_minor=discount,
         processing_fee_minor=fee,
         total_minor=subtotal - discount + fee,
-        expires_at=now + timedelta(minutes=settings.app_ticket_hold_minutes),
+        expires_at=now + timedelta(minutes=settings.hold_minutes),
         campaign_id=campaign.id if campaign else None,
     )
+    if event.visibility == "private":
+        from app.platform.operations_models import EventInvitation
+        from app.platform.operations_service import can_manage
+
+        if not can_manage(db, event, user):
+            access = db.scalar(
+                select(EventInvitation).where(
+                    EventInvitation.event_id == event.id,
+                    EventInvitation.accepted_by == user.id,
+                    EventInvitation.status == "accepted",
+                    EventInvitation.expires_at > now,
+                )
+            )
+            if access:
+                order.expires_at = min(order.expires_at, utc(access.expires_at))
     db.add(order)
     db.flush()
     for request_item in data.items:
@@ -106,6 +162,12 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
                 unit_price_minor=ticket_type.price_minor,
             )
         )
+    if request_key:
+        db.add(
+            CheckoutAttempt(
+                user_id=user.id, request_key=request_key, fingerprint=fingerprint, order_id=order.id
+            )
+        )
     from app.events.service import audit
 
     audit(
@@ -117,7 +179,13 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
         order.id,
         "Order " + str(order.status),
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            409, detail="Checkout request was already used; refresh your orders"
+        ) from None
     db.refresh(order)
     return order
 
@@ -130,13 +198,27 @@ def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Or
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    order = db.scalar(select(Order).where(Order.id == order.id).with_for_update())
+    order = db.scalar(
+        select(Order)
+        .where(Order.id == order.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if order.status == OrderStatus.CONFIRMED:
         return order
-    if order.status != OrderStatus.PENDING or utc(order.expires_at) < now:
+    if order.status == OrderStatus.PENDING and utc(order.expires_at) <= now:
+        from app.orders.reservations import release
+
+        release(db, order, "expired")
+        db.commit()
+    if order.status != OrderStatus.PENDING:
         raise HTTPException(409, detail="Checkout session expired or closed")
     if outcome != "failure" and (not event or event.status != "published"):
         raise HTTPException(409, detail="Event is not published; checkout cannot complete")
+    if outcome != "failure":
+        from app.platform.operations_service import require_access
+
+        require_access(db, event, user, purchasing=True)
     items = list(db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all())
     type_ids = [item.ticket_type_id for item in items]
     types = {
