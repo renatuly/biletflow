@@ -23,6 +23,11 @@ def require_refund_owner(db: Session, order: Order, user: User) -> Event:
 
 
 def complete_refund(db: Session, order_id: UUID, reason: str, user: User) -> Refund:
+    initial = db.get(Order, order_id)
+    if not initial:
+        raise HTTPException(404, detail="Order not found")
+    require_refund_owner(db, initial, user)
+    db.scalar(select(Event).where(Event.id == initial.event_id).with_for_update())
     order = db.scalar(
         select(Order)
         .where(Order.id == order_id)
@@ -121,5 +126,21 @@ def complete_refund(db: Session, order_id: UUID, reason: str, user: User) -> Ref
         order.id,
         "Full demonstration refund approved; linked refund cases resolved",
     )
+    from app.platform.operations_models import SimulatedPayout
+
+    payout = db.scalar(select(SimulatedPayout).where(SimulatedPayout.event_id == event.id))
+    if payout and payout.status == "paid":
+        db.add(
+            Notification(
+                user_id=event.organizer_id,
+                kind="payout_status",
+                title=event.title,
+                message=(
+                    "A refund was recorded after a simulated payout. "
+                    "Review the ledger and current estimate."
+                ),
+                data={"event_id": str(event.id)},
+            )
+        )
     db.flush()
     return refund

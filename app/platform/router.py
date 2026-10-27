@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.campaigns.models import Campaign
@@ -119,7 +119,20 @@ def admin_users(
 ):
     statement = select(User)
     if q:
-        statement = statement.where(User.email.ilike(f"%{q}%"))
+        statement = statement.where(
+            or_(
+                User.email.ilike(f"%{q}%"),
+                User.full_name.ilike(f"%{q}%"),
+                cast(User.roles, String).ilike(f"%{q}%"),
+            )
+        )
+    if q and db.bind.dialect.name == "sqlite":
+        query = q.casefold()
+        return [
+            u
+            for u in db.scalars(select(User))
+            if query in f"{u.email} {u.full_name or ''} {' '.join(u.roles)}".casefold()
+        ][:100]
     return list(db.scalars(statement.limit(100)).all())
 
 

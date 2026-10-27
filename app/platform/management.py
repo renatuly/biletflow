@@ -297,6 +297,11 @@ def controls(
 def cancel_registration(
     order_id: UUID, data: Reason, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
+    initial = db.get(Order, order_id)
+    if not initial:
+        raise HTTPException(404, detail="Order not found")
+    owner(db, initial.event_id, user)
+    db.scalar(select(Event).where(Event.id == initial.event_id).with_for_update())
     order = db.scalar(
         select(Order)
         .where(Order.id == order_id)
@@ -360,7 +365,6 @@ def cancel_registration(
 def operational_orders(
     admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)), db: Session = Depends(get_db)
 ):
-    from app.core.config import get_settings
     from app.orders.models import Payment
 
     rows = []
@@ -391,11 +395,13 @@ def operational_orders(
                 ],
             )
         )
-    settings = get_settings()
+    from app.platform.operations_service import settings as effective_settings
+
+    settings = effective_settings(db)
     return dict(
         orders=rows,
-        activation_fee_minor=settings.app_activation_fee_minor,
-        processing_fee_bps=settings.app_processing_fee_bps,
+        activation_fee_minor=settings.activation_fee_minor,
+        processing_fee_bps=settings.processing_fee_bps,
         is_simulation=True,
     )
 
