@@ -74,6 +74,21 @@ class Event(UUIDTimestampMixin, Base):
     ticket_types: Mapped[list["TicketType"]] = relationship(lazy="selectin")
 
     @property
+    def is_duplicate(self) -> bool:
+        from sqlalchemy import select
+        from sqlalchemy.orm import object_session
+
+        db = object_session(self)
+        return bool(
+            db
+            and db.scalar(
+                select(AuditLog.id)
+                .where(AuditLog.event_id == self.id, AuditLog.action == "event.duplicated")
+                .limit(1)
+            )
+        )
+
+    @property
     def organizer_name(self) -> str:
         return self.organizer.full_name or "Organizer"
 

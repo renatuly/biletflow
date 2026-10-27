@@ -75,6 +75,8 @@ def update_event(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
+    if event.status == "suspended":
+        raise HTTPException(409, detail="Administrator must restore the event before editing")
     if "refund_policy" in data.model_fields_set:
         if event.organizer_id != user.id and "platform_admin" not in user.roles:
             raise HTTPException(403, detail="Only the organizer can change refund policy")
@@ -127,8 +129,8 @@ def unpublish(event_id: UUID, user: User = Depends(current_user), db: Session = 
     event = require_event_manager(db, event_id, user)
     if event.organizer_id != user.id and "platform_admin" not in user.roles:
         raise HTTPException(403, detail="Only the organizer can unpublish this event")
-    if event.status == "cancelled":
-        raise HTTPException(409, detail="Cancelled events cannot be unpublished")
+    if event.status in ("cancelled", "suspended"):
+        raise HTTPException(409, detail="Closed or suspended events cannot be unpublished")
     event.status = "draft"
     audit(db, user, event, "event.unpublished", "event", event.id, "Event unpublished")
     db.commit()
@@ -215,6 +217,8 @@ def cancel(event_id: UUID, user: User = Depends(current_user), db: Session = Dep
 @router.post("/events/{event_id}/duplicate", response_model=EventRead, status_code=201)
 def duplicate(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     source = require_event_manager(db, event_id, user)
+    if source.organizer_id != user.id:
+        raise HTTPException(403, detail="Only the owning organizer can duplicate an event")
     copy = Event(
         organizer_id=user.id,
         venue_id=source.venue_id,
@@ -234,6 +238,23 @@ def duplicate(event_id: UUID, user: User = Depends(current_user), db: Session = 
     )
     db.add(copy)
     db.flush()
+    for kind in source.ticket_types:
+        db.add(
+            TicketType(
+                event_id=copy.id,
+                name=kind.name,
+                description=kind.description,
+                kind=kind.kind,
+                price_minor=kind.price_minor,
+                currency=kind.currency,
+                quantity=kind.quantity,
+                sales_start=kind.sales_start,
+                sales_end=kind.sales_end,
+                max_per_order=kind.max_per_order,
+                is_hidden=kind.is_hidden,
+            )
+        )
+    audit(db, user, source, "event.copy_created", "event", copy.id, "Created a new draft copy")
     audit(db, user, copy, "event.duplicated", "event", copy.id, f"Duplicated from {source.id}")
     db.commit()
     db.refresh(copy)

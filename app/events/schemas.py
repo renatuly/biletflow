@@ -58,6 +58,7 @@ class EventUpdate(BaseModel):
 
 
 class EventRead(BaseModel):
+    is_duplicate: bool = False
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     organizer_id: UUID

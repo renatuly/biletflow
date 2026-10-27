@@ -105,7 +105,9 @@ def invalidate_review(db, event, user):
             )
         record.status = "changes_required"
         record.reason = "Event details changed. Submit the updated event for review."
-        event.paid_sales_status = "not_ready"
+        event.paid_sales_status = (
+            "suspended" if event.paid_sales_status == "suspended" else "not_ready"
+        )
         audit(db, user, event, "paid_review.invalidated", "event", event.id, record.reason)
 
 
@@ -152,6 +154,8 @@ def submit(db, event_id, user):
         raise HTTPException(
             409, detail="Complete organizer details, payout, fee and terms before review"
         )
+    if event.paid_sales_status == "suspended":
+        raise HTTPException(409, detail="Administrator must restore paid sales before resubmission")
     record = application(db, event)
     current = fingerprint(db, event)
     if (
@@ -267,6 +271,10 @@ def decide(
         raise HTTPException(404, detail="Event not found")
     if event.organizer_id == user.id:
         raise HTTPException(403, detail="An administrator cannot review their own event")
+    if event.paid_sales_status == "suspended":
+        raise HTTPException(
+            409, detail="Restore the sales suspension before reviewing this application"
+        )
     record = application(db, event)
     if not record or record.status != "pending_review" or event.status != "draft":
         raise HTTPException(409, detail="This event is not awaiting review")

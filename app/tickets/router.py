@@ -46,8 +46,8 @@ async def create_ticket_type(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
-    if event.status == "cancelled":
-        raise HTTPException(409, detail="Cannot add tickets to cancelled event")
+    if event.status in ("cancelled", "suspended"):
+        raise HTTPException(409, detail="Cannot add tickets to closed or suspended event")
     if data.kind == "paid" and not event.refund_policy.strip():
         raise HTTPException(422, detail="Paid events require a refund policy description")
     from app.events.paid_applications import invalidate_review
@@ -309,8 +309,8 @@ def validate_admission(
     ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket or ticket.event_id != event_id:
         return {"result": "wrong_event"}
-    if event.status == "cancelled":
-        return {"result": "cancelled", "reason": "EVENT_CANCELLED"}
+    if event.status in ("cancelled", "suspended"):
+        return {"result": "cancelled", "reason": "EVENT_UNAVAILABLE"}
     mapping = {
         TicketStatus.CANCELLED: "cancelled",
         TicketStatus.REFUNDED: "refunded",
@@ -340,8 +340,8 @@ async def admit(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if event.status == "cancelled":
-        raise HTTPException(409, detail="Event is cancelled; admission is closed")
+    if event.status in ("cancelled", "suspended"):
+        raise HTTPException(409, detail="Event is cancelled or suspended; admission is closed")
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
         raise HTTPException(409, detail="Invalid admission QR")
@@ -461,3 +461,72 @@ def calendar_export(event_id: UUID, db: Session = Depends(get_db)):
         media_type="text/calendar",
         headers={"Content-Disposition": f'attachment; filename="event-{event.id}.ics"'},
     )
+
+
+@router.patch("/events/{event_id}/ticket-types/{ticket_type_id}", response_model=TicketTypeRead)
+def update_draft_ticket_type(
+    event_id: UUID,
+    ticket_type_id: UUID,
+    data: TicketTypeCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event:
+        raise HTTPException(404, detail="Event not found")
+    if event.organizer_id != user.id:
+        raise HTTPException(403, detail="Only the owning organizer can edit ticket types")
+    item = db.scalar(
+        select(TicketType)
+        .where(TicketType.id == ticket_type_id, TicketType.event_id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not item:
+        raise HTTPException(404, detail="Ticket type not found")
+    if event.status != "draft" or item.sold_count or item.reserved_count or item.refunded_count:
+        raise HTTPException(409, detail="Only unsold draft ticket types can be edited")
+    if data.kind == "paid" and not event.refund_policy.strip():
+        raise HTTPException(422, detail="Paid events require a refund policy")
+
+    def utc(v):
+        return v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
+
+    if utc(data.sales_start) < utc(event.registration_opens_at) or utc(data.sales_end) > utc(
+        event.registration_closes_at
+    ):
+        raise HTTPException(422, detail="Ticket sales must fit within the registration period")
+    other_quantity = sum(
+        t.quantity for t in event.ticket_types if t.id != item.id and not t.is_hidden
+    )
+    if not item.is_hidden and other_quantity + data.quantity > event.capacity:
+        raise HTTPException(422, detail="Ticket quantities exceed event capacity")
+
+    def value(v):
+        if isinstance(v, datetime):
+            return v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC)
+        return v
+
+    if any(value(getattr(item, k)) != value(v) for k, v in data.model_dump().items()):
+        from app.events.paid_applications import invalidate_review
+
+        invalidate_review(db, event, user)
+        for k, v in data.model_dump().items():
+            setattr(item, k, v)
+        audit(
+            db,
+            user,
+            event,
+            "ticket_type.updated",
+            "ticket_type",
+            item.id,
+            "Updated draft ticket configuration",
+        )
+    db.commit()
+    db.refresh(item)
+    return item

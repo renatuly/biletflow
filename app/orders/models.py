@@ -30,6 +30,31 @@ class Order(UUIDTimestampMixin, Base):
     discount_minor: Mapped[int] = mapped_column(Integer, default=0)
     processing_fee_minor: Mapped[int] = mapped_column(Integer, default=0)
     total_minor: Mapped[int] = mapped_column(Integer, default=0)
+
+    @property
+    def can_cancel_registration(self) -> bool:
+        from sqlalchemy import select
+        from sqlalchemy.orm import object_session
+
+        from app.tickets.models import Ticket, TicketType
+
+        db = object_session(self)
+        if not db or self.status != "confirmed" or self.total_minor != 0:
+            return False
+        kinds = list(
+            db.scalars(
+                select(TicketType.kind)
+                .join(OrderItem, OrderItem.ticket_type_id == TicketType.id)
+                .where(OrderItem.order_id == self.id)
+            )
+        )
+        checked = db.scalar(
+            select(Ticket.id)
+            .join(OrderItem, Ticket.order_item_id == OrderItem.id)
+            .where(OrderItem.order_id == self.id, Ticket.status == "checked_in")
+        )
+        return bool(kinds) and all(k == "free" for k in kinds) and checked is None
+
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     campaign_id: Mapped[UUID | None] = mapped_column(ForeignKey("campaigns.id"))
 

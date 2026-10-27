@@ -54,6 +54,20 @@ def candidates(db: Session, case: SupportCase):
 
 
 def history(db, case, actor, kind, old, new):
+    if case.event_id:
+        from app.events.service import audit
+
+        event = db.get(Event, case.event_id)
+        if event:
+            audit(
+                db,
+                actor,
+                event,
+                "support." + kind,
+                "support_case",
+                case.id,
+                "Support case " + kind + (": " + str(new) if kind == "status" else ""),
+            )
     db.add(
         SupportChange(
             case_id=case.id,

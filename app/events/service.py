@@ -46,13 +46,14 @@ def audit(
             entity_type=entity_type,
             entity_id=str(entity_id),
             description=description,
+            data={"actor_name": user.full_name or user.email, "actor_roles": list(user.roles)},
         )
     )
 
 
 def publish_event(db: Session, event: Event, user: User) -> Event:
-    if event.status == "cancelled":
-        raise HTTPException(409, detail="Cancelled events cannot be published")
+    if event.status in ("cancelled", "suspended"):
+        raise HTTPException(409, detail="Cancelled or suspended events cannot be published")
     paid = db.scalar(
         select(TicketType.id).where(TicketType.event_id == event.id, TicketType.kind == "paid")
     )

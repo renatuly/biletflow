@@ -11,6 +11,7 @@ from app.events.models import Event
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
 from app.orders.models import Order, Refund
+from app.platform.management import Reason
 from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import User, UserRole
 from app.users.schemas import UserRead
@@ -48,7 +49,7 @@ def analytics_summary(
             func.coalesce(func.sum(Order.subtotal_minor), 0),
             func.coalesce(func.sum(Order.discount_minor), 0),
             func.coalesce(func.sum(Order.total_minor), 0),
-        ).where(Order.event_id == event.id, Order.status == "confirmed")
+        ).where(Order.event_id == event.id, Order.status.in_(["confirmed", "refunded"]))
     ).one()
     refunds = (
         db.scalar(
@@ -125,6 +126,7 @@ def admin_users(
 @router.post("/admin/users/{user_id}/suspend")
 def suspend_user(
     user_id: UUID,
+    data: Reason | None = None,
     admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)),
     db: Session = Depends(get_db),
 ):
@@ -133,8 +135,18 @@ def suspend_user(
         raise HTTPException(404, detail="User not found")
     if target.id == admin.id:
         raise HTTPException(409, detail="Cannot suspend current administrator")
+    if data and not data.reason.strip():
+        raise HTTPException(422, detail="A reason is required")
     target.is_active = False
-    audit(db, admin, None, "user.suspended", "user", target.id, "User suspended")
+    audit(
+        db,
+        admin,
+        None,
+        "user.suspended",
+        "user",
+        target.id,
+        data.reason.strip() if data else "User suspended",
+    )
     db.commit()
     return {"status": "suspended"}
 

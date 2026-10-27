@@ -106,6 +106,17 @@ def create_checkout(db: Session, data: CheckoutCreate, user: User) -> Order:
                 unit_price_minor=ticket_type.price_minor,
             )
         )
+    from app.events.service import audit
+
+    audit(
+        db,
+        user,
+        event,
+        "order." + str(order.status),
+        "order",
+        order.id,
+        "Order " + str(order.status),
+    )
     db.commit()
     db.refresh(order)
     return order
@@ -124,8 +135,8 @@ def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Or
         return order
     if order.status != OrderStatus.PENDING or utc(order.expires_at) < now:
         raise HTTPException(409, detail="Checkout session expired or closed")
-    if outcome != "failure" and (not event or event.status == "cancelled"):
-        raise HTTPException(409, detail="Event is cancelled; checkout cannot complete")
+    if outcome != "failure" and (not event or event.status != "published"):
+        raise HTTPException(409, detail="Event is not published; checkout cannot complete")
     items = list(db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all())
     type_ids = [item.ticket_type_id for item in items]
     types = {
@@ -157,6 +168,11 @@ def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Or
                 title="Payment failed",
                 message="Your simulated payment failed.",
             )
+        )
+        from app.events.service import audit
+
+        audit(
+            db, user, event, "order.payment_failed", "order", order.id, "Simulated payment failed"
         )
         db.commit()
         return order
@@ -204,6 +220,17 @@ def complete_checkout(db: Session, order: Order, user: User, outcome: str) -> Or
             title="Tickets issued",
             message="Your BiletFlow tickets are ready.",
         )
+    )
+    from app.events.service import audit
+
+    audit(
+        db,
+        user,
+        event,
+        "order." + str(order.status),
+        "order",
+        order.id,
+        "Order " + str(order.status),
     )
     db.commit()
     db.refresh(order)
