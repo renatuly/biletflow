@@ -8,11 +8,11 @@ from fastapi.responses import Response, StreamingResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.dependencies import current_user
+from app.core.dependencies import current_user, optional_user
 from app.events.models import Event, StaffAssignment, Venue
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
@@ -25,10 +25,19 @@ router = APIRouter(tags=["tickets"])
 
 
 @router.get("/events/{event_id}/ticket-types", response_model=list[TicketTypeRead])
-def list_ticket_types(event_id: UUID, db: Session = Depends(get_db)):
+def list_ticket_types(
+    event_id: UUID, user: User | None = Depends(optional_user), db: Session = Depends(get_db)
+):
     event = db.get(Event, event_id)
     if not event or event.status != "published":
         raise HTTPException(404, detail="Event not found")
+    from app.platform.operations_service import require_access
+
+    require_access(db, event, user, purchasing=True)
+    from app.orders.reservations import expire_event
+
+    expire_event(db, event_id)
+    db.commit()
     return list(
         db.scalars(
             select(TicketType).where(
@@ -46,7 +55,9 @@ async def create_ticket_type(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
-    if event.status in ("cancelled", "suspended"):
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can create ticket types")
+    if event.status in ("cancelled", "suspended", "completed"):
         raise HTTPException(409, detail="Cannot add tickets to closed or suspended event")
     if data.kind == "paid" and not event.refund_policy.strip():
         raise HTTPException(422, detail="Paid events require a refund policy description")
@@ -55,6 +66,15 @@ async def create_ticket_type(
     if data.kind == "paid" and event.status != "draft":
         raise HTTPException(409, detail="Paid ticket types can only be added to a draft event")
     invalidate_review(db, event, user)
+    if (
+        sum(
+            t.quantity if not t.is_hidden else t.sold_count + t.reserved_count
+            for t in event.ticket_types
+        )
+        + data.quantity
+        > event.capacity
+    ):
+        raise HTTPException(422, detail="Ticket quantities exceed event capacity")
     item = TicketType(event_id=event.id, **data.model_dump())
     db.add(item)
     db.flush()
@@ -71,19 +91,128 @@ def hide_ticket_type(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    event = require_event_manager(db, event_id, user)
-    item = db.get(TicketType, ticket_type_id)
-    if not item or item.event_id != event.id:
-        raise HTTPException(404, detail="Ticket type not found")
-    from app.events.paid_applications import invalidate_review
+    return set_visibility(db, event_id, ticket_type_id, user, True)
 
-    if not item.is_hidden:
-        invalidate_review(db, event, user)
-    item.is_hidden = True
-    audit(db, user, event, "ticket_type.hidden", "ticket_type", item.id, "Ticket type hidden")
+
+def set_visibility(db, event_id, ticket_type_id, user, hidden):
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event or (event.organizer_id != user.id and "platform_admin" not in user.roles):
+        raise HTTPException(
+            403, detail="Only the organizer or administrator may manage ticket visibility"
+        )
+    if event.status not in ("draft", "published"):
+        raise HTTPException(
+            409, detail="Closed or suspended events cannot change ticket visibility"
+        )
+    item = db.scalar(
+        select(TicketType)
+        .where(TicketType.id == ticket_type_id, TicketType.event_id == event.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not item:
+        raise HTTPException(404, detail="Ticket type not found")
+    if (
+        not hidden
+        and sum(
+            t.quantity if not t.is_hidden else t.sold_count + t.reserved_count
+            for t in event.ticket_types
+            if t.id != item.id
+        )
+        + item.quantity
+        > event.capacity
+    ):
+        raise HTTPException(422, detail="Restore would exceed event capacity")
+    if item.is_hidden != hidden:
+        from app.events.paid_applications import application, fingerprint, invalidate_review
+
+        record = application(db, event)
+        approved = (
+            record
+            and record.status == "approved"
+            and record.snapshot_hash == fingerprint(db, event)
+        )
+        if not approved:
+            invalidate_review(db, event, user)
+        item.is_hidden = hidden
+        db.flush()
+        if approved:
+            record.snapshot_hash = fingerprint(db, event)
+        audit(
+            db,
+            user,
+            event,
+            "ticket_type.hidden" if hidden else "ticket_type.restored",
+            "ticket_type",
+            item.id,
+            "Ticket visibility changed; existing admissions retained",
+        )
     db.commit()
-    db.refresh(item)
     return item
+
+
+@router.post(
+    "/events/{event_id}/ticket-types/{ticket_type_id}/restore", response_model=TicketTypeRead
+)
+def restore_ticket_type(
+    event_id: UUID,
+    ticket_type_id: UUID,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    return set_visibility(db, event_id, ticket_type_id, user, False)
+
+
+@router.get("/events/{event_id}/inventory")
+def inventory(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    event = require_event_manager(db, event_id, user)
+    from app.orders.reservations import expire_event
+
+    expire_event(db, event.id)
+    db.commit()
+    rows = list(
+        db.scalars(
+            select(TicketType)
+            .where(TicketType.event_id == event.id)
+            .order_by(TicketType.created_at)
+        )
+    )
+    result = []
+    global_available = max(0, event.capacity - sum(t.sold_count + t.reserved_count for t in rows))
+    for t in rows:
+        checked = (
+            db.scalar(
+                select(func.count(Ticket.id)).where(
+                    Ticket.ticket_type_id == t.id, Ticket.status == "checked_in"
+                )
+            )
+            or 0
+        )
+
+        result.append(
+            {
+                **TicketTypeRead.model_validate(t).model_dump(),
+                "available": min(
+                    global_available, max(0, t.quantity - t.reserved_count - t.sold_count)
+                ),
+                "checked_in": checked,
+                "editable": event.status == "draft"
+                and not (t.reserved_count or t.sold_count or t.refunded_count),
+            }
+        )
+    return {
+        "event_status": event.status,
+        "registration_opens_at": event.registration_opens_at,
+        "registration_closes_at": event.registration_closes_at,
+        "refund_policy": event.refund_policy,
+        "capacity": event.capacity,
+        "ticket_types": result,
+    }
 
 
 def ticket_details(db: Session, ticket: Ticket):
@@ -479,8 +608,8 @@ def update_draft_ticket_type(
     )
     if not event:
         raise HTTPException(404, detail="Event not found")
-    if event.organizer_id != user.id:
-        raise HTTPException(403, detail="Only the owning organizer can edit ticket types")
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer or administrator can edit ticket types")
     item = db.scalar(
         select(TicketType)
         .where(TicketType.id == ticket_type_id, TicketType.event_id == event_id)
@@ -502,7 +631,9 @@ def update_draft_ticket_type(
     ):
         raise HTTPException(422, detail="Ticket sales must fit within the registration period")
     other_quantity = sum(
-        t.quantity for t in event.ticket_types if t.id != item.id and not t.is_hidden
+        (t.quantity if not t.is_hidden else t.sold_count + t.reserved_count)
+        for t in event.ticket_types
+        if t.id != item.id
     )
     if not item.is_hidden and other_quantity + data.quantity > event.capacity:
         raise HTTPException(422, detail="Ticket quantities exceed event capacity")

@@ -236,6 +236,7 @@ def test_policy_required_for_paid_types_optional_for_free_and_cannot_be_cleared(
         kind = db.get(TicketType, __import__("uuid").UUID(v["kind"]))
         kind.kind = "free"
         kind.price_minor = 0
+        db.get(Event, __import__("uuid").UUID(v["event"])).capacity = 22
         db.commit()
     assert client.patch(event_url, json={"refund_policy": ""}, headers=owner).status_code == 200
     now = datetime.now(UTC)

@@ -45,6 +45,8 @@ class EventCreate(BaseModel):
 
 
 class EventUpdate(BaseModel):
+    venue: VenueWrite | None = None
+    time_zone: str | None = None
     title: str | None = Field(default=None, min_length=3, max_length=250)
     description: str | None = Field(default=None, min_length=3)
     category: str | None = None

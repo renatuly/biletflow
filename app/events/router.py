@@ -5,9 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.dependencies import current_user, require_role
+from app.core.dependencies import current_user, optional_user, require_role
 from app.events.models import (
     AuditLog,
     Event,
@@ -42,10 +41,30 @@ def browse_events(q: str | None = None, db: Session = Depends(get_db)):
 
 
 @router.get("/events/{event_id}", response_model=EventRead)
-def read_event(event_id: UUID, db: Session = Depends(get_db)):
+def read_event(
+    event_id: UUID, user: User | None = Depends(optional_user), db: Session = Depends(get_db)
+):
     event = db.get(Event, event_id)
-    if not event or event.visibility == "private" or event.status == "draft":
+    from app.platform.operations_service import can_manage, require_access
+
+    if not event:
         raise HTTPException(404, detail="Event not found")
+    if (
+        event.status == "draft"
+        and not can_manage(db, event, user)
+        and not (
+            user
+            and db.scalar(
+                select(Order.id).where(
+                    Order.event_id == event.id,
+                    Order.user_id == user.id,
+                    Order.status.in_(["confirmed", "refunded", "cancelled"]),
+                )
+            )
+        )
+    ):
+        raise HTTPException(404, detail="Event not found")
+    require_access(db, event, user)
     return event
 
 
@@ -74,33 +93,85 @@ def update_event(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    event = require_event_manager(db, event_id, user)
-    if event.status == "suspended":
-        raise HTTPException(409, detail="Administrator must restore the event before editing")
-    if "refund_policy" in data.model_fields_set:
-        if event.organizer_id != user.id and "platform_admin" not in user.roles:
-            raise HTTPException(403, detail="Only the organizer can change refund policy")
-        if data.refund_policy is None:
-            raise HTTPException(422, detail="Refund policy must be text")
-        if not data.refund_policy.strip() and db.scalar(
-            select(TicketType.id).where(TicketType.event_id == event.id, TicketType.kind == "paid")
-        ):
-            raise HTTPException(422, detail="Paid events require a refund policy description")
-    from app.events.paid_applications import invalidate_review
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event:
+        raise HTTPException(404, detail="Event not found")
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer may edit the event")
+    if event.status in ("suspended", "cancelled", "completed"):
+        raise HTTPException(409, detail="Closed or suspended events cannot be edited")
+    changes = data.model_dump(exclude_unset=True)
+    if any(v is None for v in changes.values()):
+        raise HTTPException(422, detail="Event fields cannot be null")
 
-    def normalized(value):
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-        return value
+    def normalized(v):
+        return (
+            (v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC))
+            if isinstance(v, datetime)
+            else v
+        )
 
-    if any(
-        normalized(getattr(event, f)) != normalized(v)
-        for f, v in data.model_dump(exclude_unset=True).items()
+    starts = normalized(changes.get("starts_at", event.starts_at))
+    ends = normalized(changes.get("ends_at", event.ends_at))
+    opens = normalized(changes.get("registration_opens_at", event.registration_opens_at))
+    closes = normalized(changes.get("registration_closes_at", event.registration_closes_at))
+    if not opens < closes <= starts < ends:
+        raise HTTPException(422, detail="Registration and event dates must be ordered correctly")
+    if changes.get("capacity", event.capacity) < sum(
+        t.quantity for t in event.ticket_types if not t.is_hidden
     ):
+        raise HTTPException(422, detail="Capacity must cover configured ticket quantities")
+    if (
+        "refund_policy" in changes
+        and not changes["refund_policy"].strip()
+        and any(t.kind == "paid" for t in event.ticket_types)
+    ):
+        raise HTTPException(422, detail="Paid events require a refund policy")
+    venue_data = changes.pop("venue", None)
+    old_venue = {k: getattr(event.venue, k) for k in ("name", "address", "city")}
+    changed = any(
+        normalized(getattr(event, k)) != normalized(v) for k, v in changes.items()
+    ) or bool(venue_data and venue_data != old_venue)
+    if changed:
+        from app.events.paid_applications import invalidate_review
+
         invalidate_review(db, event, user)
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(event, field, value)
-    audit(db, user, event, "event.updated", "event", event.id, "Event details updated")
+        if venue_data and venue_data != old_venue:
+            venue = Venue(**venue_data)
+            db.add(venue)
+            db.flush()
+            event.venue_id = venue.id
+            event.venue = venue
+        for k, v in changes.items():
+            setattr(event, k, v)
+        audit(db, user, event, "event.updated", "event", event.id, "Event information updated")
+        recipients = set(
+            db.scalars(
+                select(Order.user_id).where(
+                    Order.event_id == event.id,
+                    Order.status == "confirmed",
+                    Order.user_id.is_not(None),
+                )
+            )
+        )
+        for recipient in recipients:
+            db.add(
+                Notification(
+                    user_id=recipient,
+                    kind="event_update",
+                    title=event.title,
+                    message=(
+                        "The organizer updated event information. "
+                        "Review the latest schedule, venue and event details before attending."
+                    ),
+                    data={"event_id": str(event.id)},
+                )
+            )
     db.commit()
     db.refresh(event)
     return event
@@ -376,15 +447,42 @@ def accept_terms(event_id: UUID, user: User = Depends(current_user), db: Session
 def pay_activation_fee(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    event = require_event_manager(db, event_id, user)
-    event.activation_fee_paid = True
-    audit(
-        db, user, event, "paid_sales.fee_paid", "event", event.id, "Simulated activation fee paid"
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    if not event or event.organizer_id != user.id:
+        raise HTTPException(403, detail="Only the event organizer can pay its activation fee")
+    if event.status not in ("draft", "published") or not any(
+        t.kind == "paid" for t in event.ticket_types
+    ):
+        raise HTTPException(409, detail="Activation fees apply to available paid-ticket events")
+    from app.platform.operations_models import ActivationFeeRecord
+    from app.platform.operations_service import settings
+
+    record = db.scalar(select(ActivationFeeRecord).where(ActivationFeeRecord.event_id == event.id))
+    if record is None:
+        record = ActivationFeeRecord(
+            event_id=event.id, amount_minor=settings(db).activation_fee_minor
+        )
+        db.add(record)
+        if not event.activation_fee_paid:
+            audit(
+                db,
+                user,
+                event,
+                "paid_sales.fee_paid",
+                "event",
+                event.id,
+                "Simulated activation fee paid",
+            )
+    event.activation_fee_paid = True
     db.commit()
     return {
         "status": "succeeded",
-        "amount_minor": get_settings().app_activation_fee_minor,
+        "amount_minor": record.amount_minor,
         "currency": "KZT",
         "is_simulation": True,
     }
@@ -466,7 +564,14 @@ def attach_image(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    event = require_event_manager(db, event_id, user)
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event or (event.organizer_id != user.id and "platform_admin" not in user.roles):
+        raise HTTPException(403, detail="Only the organizer may edit event banners")
     from app.events.paid_applications import invalidate_review
 
     invalidate_review(db, event, user)
@@ -478,6 +583,25 @@ def attach_image(
         return event
     event.images = [url, *[image for image in current if image != url]]
     audit(db, user, event, "event.banner_attached", "event", event.id, "Updated event banner URL")
+    for recipient in set(
+        db.scalars(
+            select(Order.user_id).where(
+                Order.event_id == event.id, Order.status == "confirmed", Order.user_id.is_not(None)
+            )
+        )
+    ):
+        db.add(
+            Notification(
+                user_id=recipient,
+                kind="event_update",
+                title=event.title,
+                message=(
+                    "The organizer updated the event banner. Review the latest event information."
+                ),
+                data={"event_id": str(event.id)},
+            )
+        )
+
     db.commit()
     db.refresh(event)
     return event

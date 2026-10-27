@@ -308,6 +308,10 @@ def create_case(
     event = db.get(Event, event_id) if event_id else None
     if event_id and not event:
         raise HTTPException(404, detail="Event not found")
+    if not platform and event and not order:
+        from app.platform.operations_service import require_access
+
+        require_access(db, event, user)
     if platform and event and event.organizer_id != user.id:
         raise HTTPException(
             403, detail="Platform case context must belong to your organizer account"
@@ -389,8 +393,10 @@ def list_cases(
             or (view != "mine" and can_manage(db, c, user))
         )
     ]
-    if not (flow == "organizer_platform" and view == "mine") and "event_admin" in user.roles and not {"attendee", "organizer", "platform_admin"}.intersection(
-        user.roles
+    if (
+        not (flow == "organizer_platform" and view == "mine")
+        and "event_admin" in user.roles
+        and not {"attendee", "organizer", "platform_admin"}.intersection(user.roles)
     ):
         assignments = db.scalars(select(StaffAssignment).where(StaffAssignment.user_id == user.id))
         if not any("support" in a.permissions for a in assignments):

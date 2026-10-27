@@ -35,3 +35,12 @@ def require_role(*roles: UserRole):
         return user
 
     return dependency
+
+
+async def optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if credentials is None:
+        return None
+    return await current_user(credentials, db)
