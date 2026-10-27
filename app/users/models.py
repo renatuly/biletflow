@@ -29,6 +29,26 @@ class User(UUIDTimestampMixin, Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    @property
+    def support_access(self) -> bool:
+        if {"organizer", "platform_admin"}.intersection(self.roles):
+            return True
+        from sqlalchemy import select
+        from sqlalchemy.orm import object_session
+
+        from app.events.models import StaffAssignment
+
+        db = object_session(self)
+        return bool(
+            db
+            and any(
+                "support" in a.permissions
+                for a in db.scalars(
+                    select(StaffAssignment).where(StaffAssignment.user_id == self.id)
+                )
+            )
+        )
+
 
 class Notification(UUIDTimestampMixin, Base):
     __tablename__ = "notifications"

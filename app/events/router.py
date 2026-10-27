@@ -75,6 +75,15 @@ def update_event(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
+    if "refund_policy" in data.model_fields_set:
+        if event.organizer_id != user.id and "platform_admin" not in user.roles:
+            raise HTTPException(403, detail="Only the organizer can change refund policy")
+        if data.refund_policy is None:
+            raise HTTPException(422, detail="Refund policy must be text")
+        if not data.refund_policy.strip() and db.scalar(
+            select(TicketType.id).where(TicketType.event_id == event.id, TicketType.kind == "paid")
+        ):
+            raise HTTPException(422, detail="Paid events require a refund policy description")
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(event, field, value)
     audit(db, user, event, "event.updated", "event", event.id, "Event details updated")

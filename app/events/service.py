@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.events.models import AuditLog, Event, StaffAssignment
+from app.tickets.models import TicketType
 from app.users.models import User, UserRole
 
 
@@ -17,7 +18,13 @@ def require_event_manager(db: Session, event_id: UUID, user: User) -> Event:
             StaffAssignment.event_id == event_id, StaffAssignment.user_id == user.id
         )
     )
-    if event.organizer_id != user.id and UserRole.PLATFORM_ADMIN not in user.roles and not assigned:
+    if (
+        event.organizer_id != user.id
+        and UserRole.PLATFORM_ADMIN not in user.roles
+        and not (
+            assigned and any(p in assigned.permissions for p in ["check_in", "manage_attendees"])
+        )
+    ):
         raise HTTPException(403, detail="Not authorized for this event")
     return event
 
@@ -46,6 +53,11 @@ def audit(
 def publish_event(db: Session, event: Event, user: User) -> Event:
     if event.status == "cancelled":
         raise HTTPException(409, detail="Cancelled events cannot be published")
+    paid = db.scalar(
+        select(TicketType.id).where(TicketType.event_id == event.id, TicketType.kind == "paid")
+    )
+    if paid and not event.refund_policy.strip():
+        raise HTTPException(422, detail="Paid events require a refund policy description")
     event.status = "published"
     audit(db, user, event, "event.published", "event", event.id, "Event published")
     db.commit()

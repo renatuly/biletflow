@@ -7,12 +7,12 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.dependencies import current_user
 from app.events.models import Event
-from app.events.service import audit, require_event_manager
-from app.orders.models import Order, OrderItem, Payment, Refund
+from app.events.service import require_event_manager
+from app.orders.models import Order
+from app.orders.refunds import complete_refund
 from app.orders.schemas import CheckoutCreate, OrderRead, PaymentSimulation, RefundRequest
 from app.orders.service import complete_checkout, create_checkout
-from app.tickets.models import Ticket, TicketStatus, TicketType
-from app.users.models import Notification, User
+from app.users.models import User
 
 router = APIRouter(tags=["orders", "checkout"])
 
@@ -88,42 +88,10 @@ def refund_order(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    if not data.reason.strip():
+        raise HTTPException(422, detail="Refund reason is required")
+    refund = complete_refund(db, order_id, data.reason.strip(), user)
     order = db.get(Order, order_id)
-    if not order:
-        raise HTTPException(404, detail="Order not found")
-    event = require_event_manager(db, order.event_id, user)
-    if order.status != "confirmed":
-        raise HTTPException(409, detail="Only confirmed orders can be refunded")
-    payment = db.scalar(
-        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
-    )
-    refund = Refund(
-        order_id=order.id,
-        payment_id=payment.id if payment else None,
-        initiated_by=user.id,
-        amount_minor=order.total_minor,
-        reason=data.reason,
-    )
-    db.add(refund)
-    items = list(db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all())
-    for item in items:
-        ticket_type = db.get(TicketType, item.ticket_type_id)
-        ticket_type.refunded_count += item.quantity
-        ticket_type.sold_count -= item.quantity
-    for ticket in db.scalars(select(Ticket).where(Ticket.order_item_id.in_([i.id for i in items]))):
-        ticket.status = TicketStatus.REFUNDED
-    order.status = "refunded"
-    db.add(
-        Notification(
-            user_id=order.user_id,
-            kind="refund_completion",
-            title="Refund completed",
-            message="Your demonstration refund was completed.",
-        )
-    )
-    audit(
-        db, user, event, "order.refunded", "order", order.id, "Full demonstration refund completed"
-    )
     db.commit()
     db.refresh(refund)
     return {

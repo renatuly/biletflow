@@ -47,3 +47,6 @@ async def get_db() -> Generator:
 
 def create_schema() -> None:
     Base.metadata.create_all(bind=engine)
+    from app.support.migrate import upgrade
+
+    upgrade(engine)

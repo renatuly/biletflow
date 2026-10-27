@@ -16,6 +16,7 @@ from app.core.dependencies import current_user
 from app.events.models import Event, StaffAssignment, Venue
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
+from app.orders.models import Order, OrderItem
 from app.tickets.models import CheckInRecord, Ticket, TicketStatus, TicketType
 from app.tickets.schemas import TicketRead, TicketTypeCreate, TicketTypeRead
 from app.users.models import User
@@ -47,6 +48,8 @@ async def create_ticket_type(
     event = require_event_manager(db, event_id, user)
     if event.status == "cancelled":
         raise HTTPException(409, detail="Cannot add tickets to cancelled event")
+    if data.kind == "paid" and not event.refund_policy.strip():
+        raise HTTPException(422, detail="Paid events require a refund policy description")
     item = TicketType(event_id=event.id, **data.model_dump())
     db.add(item)
     db.flush()
@@ -74,18 +77,31 @@ def hide_ticket_type(
     return item
 
 
+def ticket_details(db: Session, ticket: Ticket):
+    item = db.get(OrderItem, ticket.order_item_id)
+    order = db.get(Order, item.order_id)
+    return TicketRead.model_validate(ticket).model_copy(
+        update={
+            "order_id": order.id,
+            "can_request_refund": order.status == "confirmed" and order.total_minor > 0,
+        }
+    )
+
+
+
 @router.get("/tickets", response_model=list[TicketRead])
 async def my_tickets(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    return list(
+    tickets = list(
         db.scalars(
             select(Ticket).where(Ticket.owner_id == user.id).order_by(Ticket.created_at.desc())
         ).all()
     )
+    return [ticket_details(db, ticket) for ticket in tickets]
 
 
 @router.get("/tickets/{ticket_id}", response_model=TicketRead)
 def read_ticket(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    ticket = db.get(Ticket, ticket_id)
+    ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket:
         raise HTTPException(404, detail="Ticket not found")
     event = db.get(Event, ticket.event_id)
@@ -95,11 +111,11 @@ def read_ticket(ticket_id: UUID, user: User = Depends(current_user), db: Session
         and "platform_admin" not in user.roles
     ):
         raise HTTPException(403, detail="Not authorized")
-    return ticket
+    return ticket_details(db, ticket)
 
 
 def authorized_ticket(db: Session, ticket_id: UUID, user: User) -> tuple[Ticket, Event]:
-    ticket = db.get(Ticket, ticket_id)
+    ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket:
         raise HTTPException(404, detail="Ticket not found")
     event = db.get(Event, ticket.event_id)
@@ -123,6 +139,11 @@ def ticket_event(
 @router.get("/tickets/{ticket_id}/qr")
 def ticket_qr(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     ticket, _ = authorized_ticket(db, ticket_id, user)
+    if ticket.status not in (
+        TicketStatus.VALID,
+        TicketStatus.CHECKED_IN,
+    ):
+        raise HTTPException(409, detail="Ticket is not valid for admission")
     image = qrcode.make(ticket.qr_credential)
     stream = io.BytesIO()
     image.save(stream, format="PNG")
@@ -134,6 +155,11 @@ async def ticket_pdf(
     ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     ticket, event = authorized_ticket(db, ticket_id, user)
+    if ticket.status not in (
+        TicketStatus.VALID,
+        TicketStatus.CHECKED_IN,
+    ):
+        raise HTTPException(409, detail="Ticket is not valid for admission")
     ticket_type = db.get(TicketType, ticket.ticket_type_id)
     venue = db.get(Venue, event.venue_id)
     qr_stream = io.BytesIO()
@@ -174,7 +200,7 @@ async def ticket_pdf(
     )
 
 
-def assigned_event(db: Session, event_id: UUID, user: User) -> Event:
+def assigned_event(db: Session, event_id: UUID, user: User, permission: str = "check_in") -> Event:
     event = db.get(Event, event_id)
     assignment = (
         db.scalar(
@@ -186,7 +212,9 @@ def assigned_event(db: Session, event_id: UUID, user: User) -> Event:
         else None
     )
     if not event or (
-        not assignment and event.organizer_id != user.id and "platform_admin" not in user.roles
+        (not assignment or permission not in assignment.permissions)
+        and event.organizer_id != user.id
+        and "platform_admin" not in user.roles
     ):
         raise HTTPException(403, detail="Not assigned to event")
     return event
@@ -194,7 +222,11 @@ def assigned_event(db: Session, event_id: UUID, user: User) -> Event:
 
 @router.get("/check-in/events", response_model=list[EventRead])
 def checkin_events(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    ids = select(StaffAssignment.event_id).where(StaffAssignment.user_id == user.id)
+    ids = [
+        a.event_id
+        for a in db.scalars(select(StaffAssignment).where(StaffAssignment.user_id == user.id))
+        if "check_in" in a.permissions
+    ]
     return list(
         db.scalars(select(Event).where((Event.id.in_(ids)) | (Event.organizer_id == user.id))).all()
     )
@@ -236,7 +268,7 @@ async def manual_admission(
     db: Session = Depends(get_db),
 ):
     assigned_event(db, event_id, user)
-    ticket = db.get(Ticket, ticket_id)
+    ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket or ticket.event_id != event_id:
         raise HTTPException(404, detail="Ticket not found for this event")
     return await admit(event_id, ticket.qr_credential, "manual", user, db)
@@ -260,7 +292,7 @@ def validate_admission(
             if not qr_payload.startswith("ticket.")
             else "INVALID_QR",
         }
-    ticket = db.get(Ticket, ticket_id)
+    ticket = db.get(Ticket, UUID(str(ticket_id)))
     if not ticket or ticket.event_id != event_id:
         return {"result": "wrong_event"}
     mapping = {
@@ -289,7 +321,12 @@ async def admit(
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
         raise HTTPException(409, detail="Invalid admission QR")
-    ticket = db.scalar(select(Ticket).where(Ticket.id == UUID(ticket_id)).with_for_update())
+    ticket = db.scalar(
+        select(Ticket)
+        .where(Ticket.id == UUID(str(ticket_id)))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not ticket or ticket.event_id != event.id:
         raise HTTPException(409, detail="Ticket is for another event")
     if ticket.status != TicketStatus.VALID:
@@ -325,7 +362,7 @@ def reverse_checkin(
     record = db.get(CheckInRecord, record_id)
     if not record:
         raise HTTPException(404, detail="Active check-in not found")
-    event = assigned_event(db, record.event_id, user)
+    event = assigned_event(db, record.event_id, user, "reverse_check_in")
     ticket = db.scalar(select(Ticket).where(Ticket.id == record.ticket_id).with_for_update())
     db.refresh(record)
     if record.reversed_at or ticket.status != TicketStatus.CHECKED_IN:

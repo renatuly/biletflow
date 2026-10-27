@@ -385,3 +385,8 @@ Roles: `attendee`, `organizer`, `event_admin`, `platform_admin`. One user may ho
 - [ ] **Idempotency-Key storage** — needs a dedicated table to store keys + cached results; not yet in the DB schema.
 - [ ] **Naming alignment** — `admission_type` (contract) vs `seating_type` (schema); `campaign_token` (contract) vs `promo_codes.campaign_qr_token` (schema). Converge on one glossary.
 - [ ] **Implementation order** — auth → events/tickets → checkout/orders/tickets → check-in → campaigns/support/analytics → bonus. Matches the project plan's Phase 2/3 breakdown; confirm with the team.
+
+
+## Separate support queues
+
+See [Support flows](docs/SUPPORT_FLOWS.md) for the flow discriminator, scoped staff grants, assignment/history endpoints, idempotent submissions, fallback routing, and migration.

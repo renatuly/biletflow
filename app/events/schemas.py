@@ -31,7 +31,7 @@ class EventCreate(BaseModel):
     admission_type: str = Field(
         default="general_admission", pattern="^(general_admission|assigned_seating)$"
     )
-    refund_policy: str = "No refunds"
+    refund_policy: str = ""
 
     @model_validator(mode="after")
     def validate_dates(self):

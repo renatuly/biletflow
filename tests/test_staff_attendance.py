@@ -43,7 +43,9 @@ def test_owner_and_assigned_staff_can_read_orders_but_others_cannot():
         db.flush()
         db.add(
             StaffAssignment(
-                event_id=event.id, user_id=staff.id, permissions=["check_in", "manage_attendees"]
+                event_id=event.id,
+                user_id=staff.id,
+                permissions=["check_in", "reverse_check_in", "manage_attendees"],
             )
         )
         order = Order(
