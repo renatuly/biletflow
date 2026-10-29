@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.campaigns.models import Campaign
@@ -13,6 +13,7 @@ from app.events.models import Event
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
 from app.orders.models import Order, OrderItem, Refund
+from app.platform.management import Reason
 from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import User, UserRole
 from app.users.schemas import UserRead
@@ -50,7 +51,7 @@ def analytics_summary(
             func.coalesce(func.sum(Order.subtotal_minor), 0),
             func.coalesce(func.sum(Order.discount_minor), 0),
             func.coalesce(func.sum(Order.total_minor), 0),
-        ).where(Order.event_id == event.id, Order.status == "confirmed")
+        ).where(Order.event_id == event.id, Order.status.in_(["confirmed", "refunded"]))
     ).one()
     refunds = (
         db.scalar(
@@ -210,13 +211,27 @@ def admin_users(
 ):
     statement = select(User)
     if q:
-        statement = statement.where(User.email.ilike(f"%{q}%"))
+        statement = statement.where(
+            or_(
+                User.email.ilike(f"%{q}%"),
+                User.full_name.ilike(f"%{q}%"),
+                cast(User.roles, String).ilike(f"%{q}%"),
+            )
+        )
+    if q and db.bind.dialect.name == "sqlite":
+        query = q.casefold()
+        return [
+            u
+            for u in db.scalars(select(User))
+            if query in f"{u.email} {u.full_name or ''} {' '.join(u.roles)}".casefold()
+        ][:100]
     return list(db.scalars(statement.limit(100)).all())
 
 
 @router.post("/admin/users/{user_id}/suspend")
 def suspend_user(
     user_id: UUID,
+    data: Reason | None = None,
     admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)),
     db: Session = Depends(get_db),
 ):
@@ -225,8 +240,18 @@ def suspend_user(
         raise HTTPException(404, detail="User not found")
     if target.id == admin.id:
         raise HTTPException(409, detail="Cannot suspend current administrator")
+    if data and not data.reason.strip():
+        raise HTTPException(422, detail="A reason is required")
     target.is_active = False
-    audit(db, admin, None, "user.suspended", "user", target.id, "User suspended")
+    audit(
+        db,
+        admin,
+        None,
+        "user.suspended",
+        "user",
+        target.id,
+        data.reason.strip() if data else "User suspended",
+    )
     db.commit()
     return {"status": "suspended"}
 
@@ -240,7 +265,7 @@ def admin_events(
     statement = select(Event)
     if q:
         statement = statement.where(Event.title.ilike(f"%{q}%"))
-    return list(db.scalars(statement.limit(100)).all())
+    return list(db.scalars(statement.order_by(Event.starts_at.desc())).all())
 
 
 @router.post("/admin/events/{event_id}/suspend")
@@ -310,3 +335,23 @@ def admin_campaigns(
             statement.order_by(Campaign.created_at.desc()).limit(200)
         ).all()
     ]
+
+
+@router.get("/admin/events/summary")
+def admin_event_summary(
+    admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)), db: Session = Depends(get_db)
+):
+    return {
+        "events_total": db.scalar(select(func.count(Event.id))) or 0,
+        "published_events": db.scalar(
+            select(func.count(Event.id)).where(Event.status == "published")
+        )
+        or 0,
+        "tickets_issued": db.scalar(select(func.count(Ticket.id))) or 0,
+        "confirmed_order_total_minor": db.scalar(
+            select(func.coalesce(func.sum(Order.total_minor), 0)).where(Order.status == "confirmed")
+        )
+        or 0,
+        "currency": "KZT",
+        "is_simulation": True,
+    }

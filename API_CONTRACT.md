@@ -385,3 +385,35 @@ Roles: `attendee`, `organizer`, `event_admin`, `platform_admin`. One user may ho
 - [ ] **Idempotency-Key storage** — needs a dedicated table to store keys + cached results; not yet in the DB schema.
 - [ ] **Naming alignment** — `admission_type` (contract) vs `seating_type` (schema); `campaign_token` (contract) vs `promo_codes.campaign_qr_token` (schema). Converge on one glossary.
 - [ ] **Implementation order** — auth → events/tickets → checkout/orders/tickets → check-in → campaigns/support/analytics → bonus. Matches the project plan's Phase 2/3 breakdown; confirm with the team.
+
+
+## Separate support queues
+
+See [Support flows](docs/SUPPORT_FLOWS.md) for the flow discriminator, scoped staff grants, assignment/history endpoints, idempotent submissions, fallback routing, and migration.
+
+
+## Manual paid-event review
+
+- `POST /events/{id}/paid-sales/apply`: organizer submits a draft after completing
+  sandbox profile/payout checks, paying the activation fee, and accepting terms.
+  Returns `pending_review`. The older `/paid-sales/activate` endpoint now submits
+  the same application; it cannot self-activate sales.
+- `GET /events/{id}/paid-sales`: includes `review_status`, `review_reason`, and
+  `can_activate` (eligibility to submit). Review states are `not_submitted`,
+  `pending_review`, `approved`, `rejected`, and `changes_required`.
+- `GET /admin/paid-event-applications`: Platform Admin queue with event, ticket,
+  organizer contact/payout context, fee/terms flags, decision reason and timestamps.
+- `POST /admin/paid-event-applications/{event_id}/approve` or `/reject`: admin-only,
+  JSON `{ "reason": "..." }`; rejection requires a nonblank reason. Administrators
+  cannot review their own events. Approval leaves the event as a draft and enables
+  the organizer to publish. The organizer receives an in-app decision notification.
+- Material draft changes invalidate a pending/approved review. Publication and paid
+  checkout verify approval against the reviewed event/ticket configuration.
+  Resubmission retains the paid activation fee. Free-only publication is unchanged.
+- `GET /admin/events/summary`: global event/published/ticket-issued counts and
+  confirmed order totals in minor KZT units, computed from database records.
+
+The additive `paid_event_applications` table is created by normal backend startup.
+Existing unreviewed paid events cannot accept new paid checkout. Organizers can
+unpublish them, submit for review, and republish after approval. Existing orders
+and admission records are retained; no applications are automatically approved.

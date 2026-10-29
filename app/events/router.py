@@ -5,20 +5,19 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.dependencies import current_user, require_role
+from app.core.dependencies import current_user, optional_user, require_role
 from app.core.email import queue
 from app.events.models import (
     AuditLog,
     Event,
     OrganizerProfile,
-    PaidSalesStatus,
     StaffAssignment,
     Venue,
 )
 from app.events.schemas import (
     EventCreate,
+    EventImageCreate,
     EventRead,
     EventUpdate,
     OrganizerProfileRead,
@@ -26,8 +25,9 @@ from app.events.schemas import (
 )
 from app.events.service import audit, publish_event, require_event_manager
 from app.notifications.emails import event_cancelled_email
+from app.orders.models import Order
 from app.tickets.models import Ticket, TicketStatus, TicketType
-from app.users.models import User, UserRole
+from app.users.models import Notification, User, UserRole
 
 router = APIRouter(tags=["events"])
 
@@ -43,10 +43,30 @@ def browse_events(q: str | None = None, db: Session = Depends(get_db)):
 
 
 @router.get("/events/{event_id}", response_model=EventRead)
-def read_event(event_id: UUID, db: Session = Depends(get_db)):
+def read_event(
+    event_id: UUID, user: User | None = Depends(optional_user), db: Session = Depends(get_db)
+):
     event = db.get(Event, event_id)
-    if not event or event.visibility == "private" or event.status == "draft":
+    from app.platform.operations_service import can_manage, require_access
+
+    if not event:
         raise HTTPException(404, detail="Event not found")
+    if (
+        event.status == "draft"
+        and not can_manage(db, event, user)
+        and not (
+            user
+            and db.scalar(
+                select(Order.id).where(
+                    Order.event_id == event.id,
+                    Order.user_id == user.id,
+                    Order.status.in_(["confirmed", "refunded", "cancelled"]),
+                )
+            )
+        )
+    ):
+        raise HTTPException(404, detail="Event not found")
+    require_access(db, event, user)
     return event
 
 
@@ -75,10 +95,85 @@ def update_event(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    event = require_event_manager(db, event_id, user)
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(event, field, value)
-    audit(db, user, event, "event.updated", "event", event.id, "Event details updated")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event:
+        raise HTTPException(404, detail="Event not found")
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer may edit the event")
+    if event.status in ("suspended", "cancelled", "completed"):
+        raise HTTPException(409, detail="Closed or suspended events cannot be edited")
+    changes = data.model_dump(exclude_unset=True)
+    if any(v is None for v in changes.values()):
+        raise HTTPException(422, detail="Event fields cannot be null")
+
+    def normalized(v):
+        return (
+            (v.replace(tzinfo=UTC) if v.tzinfo is None else v.astimezone(UTC))
+            if isinstance(v, datetime)
+            else v
+        )
+
+    starts = normalized(changes.get("starts_at", event.starts_at))
+    ends = normalized(changes.get("ends_at", event.ends_at))
+    opens = normalized(changes.get("registration_opens_at", event.registration_opens_at))
+    closes = normalized(changes.get("registration_closes_at", event.registration_closes_at))
+    if not opens < closes <= starts < ends:
+        raise HTTPException(422, detail="Registration and event dates must be ordered correctly")
+    if changes.get("capacity", event.capacity) < sum(
+        t.quantity for t in event.ticket_types if not t.is_hidden
+    ):
+        raise HTTPException(422, detail="Capacity must cover configured ticket quantities")
+    if (
+        "refund_policy" in changes
+        and not changes["refund_policy"].strip()
+        and any(t.kind == "paid" for t in event.ticket_types)
+    ):
+        raise HTTPException(422, detail="Paid events require a refund policy")
+    venue_data = changes.pop("venue", None)
+    old_venue = {k: getattr(event.venue, k) for k in ("name", "address", "city")}
+    changed = any(
+        normalized(getattr(event, k)) != normalized(v) for k, v in changes.items()
+    ) or bool(venue_data and venue_data != old_venue)
+    if changed:
+        from app.events.paid_applications import invalidate_review
+
+        invalidate_review(db, event, user)
+        if venue_data and venue_data != old_venue:
+            venue = Venue(**venue_data)
+            db.add(venue)
+            db.flush()
+            event.venue_id = venue.id
+            event.venue = venue
+        for k, v in changes.items():
+            setattr(event, k, v)
+        audit(db, user, event, "event.updated", "event", event.id, "Event information updated")
+        recipients = set(
+            db.scalars(
+                select(Order.user_id).where(
+                    Order.event_id == event.id,
+                    Order.status == "confirmed",
+                    Order.user_id.is_not(None),
+                )
+            )
+        )
+        for recipient in recipients:
+            db.add(
+                Notification(
+                    user_id=recipient,
+                    kind="event_update",
+                    title=event.title,
+                    message=(
+                        "The organizer updated event information. "
+                        "Review the latest schedule, venue and event details before attending."
+                    ),
+                    data={"event_id": str(event.id)},
+                )
+            )
     db.commit()
     db.refresh(event)
     return event
@@ -91,6 +186,14 @@ async def publish(
     event = require_event_manager(db, event_id, user)
     if not user.email_verified and UserRole.PLATFORM_ADMIN not in user.roles:
         raise HTTPException(403, detail="Verify your email address before publishing events")
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can publish this event")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not db.scalar(select(TicketType).where(TicketType.event_id == event.id)):
         raise HTTPException(409, detail="Create at least one ticket type before publishing")
     return publish_event(db, event, user)
@@ -99,6 +202,10 @@ async def publish(
 @router.post("/events/{event_id}/unpublish", response_model=EventRead)
 def unpublish(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     event = require_event_manager(db, event_id, user)
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can unpublish this event")
+    if event.status in ("cancelled", "suspended"):
+        raise HTTPException(409, detail="Closed or suspended events cannot be unpublished")
     event.status = "draft"
     audit(db, user, event, "event.unpublished", "event", event.id, "Event unpublished")
     db.commit()
@@ -114,25 +221,76 @@ def cancel(
     db: Session = Depends(get_db),
 ):
     event = require_event_manager(db, event_id, user)
-    if event.status == "cancelled":
-        return event
+    if event.organizer_id != user.id and "platform_admin" not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can cancel this event")
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    was_cancelled = event.status == "cancelled"
     event.status = "cancelled"
     event.paid_sales_status = "suspended"
-    holders: dict[str, str] = {}
-    for ticket in db.scalars(
-        select(Ticket).where(Ticket.event_id == event.id, Ticket.status == TicketStatus.VALID)
-    ):
-        ticket.status = TicketStatus.CANCELLED
-        holders.setdefault(ticket.attendee_email, ticket.attendee_name)
-    audit(
-        db,
-        user,
-        event,
-        "event.cancelled",
-        "event",
-        event.id,
-        f"Event cancelled, sales stopped, {len(holders)} ticket holder(s) notified",
+    tickets = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.event_id == event.id)
+            .order_by(Ticket.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     )
+    changed = 0
+    holders: dict[str, str] = {}
+    for ticket in tickets:
+        if ticket.status == TicketStatus.VALID:
+            ticket.status = TicketStatus.CANCELLED
+            changed += 1
+            holders.setdefault(ticket.attendee_email, ticket.attendee_name)
+    recipients = {t.owner_id for t in tickets if t.owner_id}
+    recipients.update(
+        db.scalars(
+            select(Order.user_id).where(
+                Order.event_id == event.id,
+                Order.user_id.is_not(None),
+                Order.status.in_(["confirmed", "partially_refunded", "refunded"]),
+            )
+        )
+    )
+    notified = {
+        n.user_id
+        for n in db.scalars(
+            select(Notification).where(
+                Notification.kind == "event_cancellation", Notification.user_id.in_(recipients)
+            )
+        )
+        if n.data.get("event_id") == str(event.id)
+    }
+    for user_id in recipients - notified:
+        db.add(
+            Notification(
+                user_id=user_id,
+                kind="event_cancellation",
+                title="Event cancelled",
+                message=(
+                    f"{event.title} has been cancelled. Your tickets cannot be used for admission. "
+                    "Refunds are handled separately; contact the organizer for help."
+                ),
+                data={"event_id": str(event.id)},
+            )
+        )
+    if not was_cancelled or changed:
+        audit(
+            db,
+            user,
+            event,
+            "event.cancelled",
+            "event",
+            event.id,
+            f"Event cancelled; sales stopped; {changed} unused tickets invalidated; "
+            "refunds separate",
+        )
     db.commit()
     db.refresh(event)
     queue(
@@ -144,6 +302,8 @@ def cancel(
 @router.post("/events/{event_id}/duplicate", response_model=EventRead, status_code=201)
 def duplicate(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     source = require_event_manager(db, event_id, user)
+    if source.organizer_id != user.id:
+        raise HTTPException(403, detail="Only the owning organizer can duplicate an event")
     copy = Event(
         organizer_id=user.id,
         venue_id=source.venue_id,
@@ -163,6 +323,23 @@ def duplicate(event_id: UUID, user: User = Depends(current_user), db: Session = 
     )
     db.add(copy)
     db.flush()
+    for kind in source.ticket_types:
+        db.add(
+            TicketType(
+                event_id=copy.id,
+                name=kind.name,
+                description=kind.description,
+                kind=kind.kind,
+                price_minor=kind.price_minor,
+                currency=kind.currency,
+                quantity=kind.quantity,
+                sales_start=kind.sales_start,
+                sales_end=kind.sales_end,
+                max_per_order=kind.max_per_order,
+                is_hidden=kind.is_hidden,
+            )
+        )
+    audit(db, user, source, "event.copy_created", "event", copy.id, "Created a new draft copy")
     audit(db, user, copy, "event.duplicated", "event", copy.id, f"Duplicated from {source.id}")
     db.commit()
     db.refresh(copy)
@@ -247,10 +424,24 @@ def paid_sales_checklist(
         "activation_fee_paid": event.activation_fee_paid,
         "terms_accepted": event.paid_terms_accepted_at is not None,
     }
+    from app.events.paid_applications import application, fingerprint
+
+    review = application(db, event)
+    review_status = review.status if review else "not_submitted"
+    if (
+        review
+        and review.status in ("approved", "pending_review")
+        and review.snapshot_hash != fingerprint(db, event)
+    ):
+        review_status = "changes_required"
     return {
         "status": event.paid_sales_status,
         "checklist": checklist,
-        "can_activate": all(checklist.values()),
+        "can_activate": all(checklist.values())
+        and review_status not in ("pending_review", "approved")
+        and event.status == "draft",
+        "review_status": review_status,
+        "review_reason": review.reason if review else "",
         "is_simulation": True,
     }
 
@@ -270,15 +461,42 @@ def accept_terms(event_id: UUID, user: User = Depends(current_user), db: Session
 def pay_activation_fee(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    event = require_event_manager(db, event_id, user)
-    event.activation_fee_paid = True
-    audit(
-        db, user, event, "paid_sales.fee_paid", "event", event.id, "Simulated activation fee paid"
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    if not event or event.organizer_id != user.id:
+        raise HTTPException(403, detail="Only the event organizer can pay its activation fee")
+    if event.status not in ("draft", "published") or not any(
+        t.kind == "paid" for t in event.ticket_types
+    ):
+        raise HTTPException(409, detail="Activation fees apply to available paid-ticket events")
+    from app.platform.operations_models import ActivationFeeRecord
+    from app.platform.operations_service import settings
+
+    record = db.scalar(select(ActivationFeeRecord).where(ActivationFeeRecord.event_id == event.id))
+    if record is None:
+        record = ActivationFeeRecord(
+            event_id=event.id, amount_minor=settings(db).activation_fee_minor
+        )
+        db.add(record)
+        if not event.activation_fee_paid:
+            audit(
+                db,
+                user,
+                event,
+                "paid_sales.fee_paid",
+                "event",
+                event.id,
+                "Simulated activation fee paid",
+            )
+    event.activation_fee_paid = True
     db.commit()
     return {
         "status": "succeeded",
-        "amount_minor": get_settings().app_activation_fee_minor,
+        "amount_minor": record.amount_minor,
         "currency": "KZT",
         "is_simulation": True,
     }
@@ -288,26 +506,9 @@ def pay_activation_fee(
 def activate_paid_sales(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    event = require_event_manager(db, event_id, user)
-    profile = db.scalar(
-        select(OrganizerProfile).where(OrganizerProfile.user_id == event.organizer_id)
-    )
-    ready = (
-        event.activation_fee_paid
-        and event.paid_terms_accepted_at
-        and profile
-        and profile.verification_status == "verified"
-        and profile.payout_verified
-        and db.scalar(
-            select(TicketType).where(TicketType.event_id == event.id, TicketType.kind == "paid")
-        )
-    )
-    if not ready:
-        raise HTTPException(409, detail="Paid-sales activation checklist is incomplete")
-    event.paid_sales_status = PaidSalesStatus.ACTIVE
-    audit(db, user, event, "paid_sales.activated", "event", event.id, "Paid sales activated")
-    db.commit()
-    return {"status": event.paid_sales_status, "is_simulation": True}
+    from app.events.paid_applications import submit
+
+    return submit(db, event_id, user)
 
 
 @router.post("/events/{event_id}/staff", status_code=201)
@@ -368,3 +569,53 @@ def event_history(
         }
         for x in logs
     ]
+
+
+@router.post("/events/{event_id}/images", response_model=EventRead)
+def attach_image(
+    event_id: UUID,
+    data: EventImageCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    event = db.scalar(
+        select(Event)
+        .where(Event.id == event_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not event or (event.organizer_id != user.id and "platform_admin" not in user.roles):
+        raise HTTPException(403, detail="Only the organizer may edit event banners")
+    from app.events.paid_applications import invalidate_review
+
+    invalidate_review(db, event, user)
+    if event.status != "draft":
+        raise HTTPException(409, detail="Only draft banners can be changed")
+    url = str(data.url)
+    current = event.images or []
+    if current and current[0] == url:
+        return event
+    event.images = [url, *[image for image in current if image != url]]
+    audit(db, user, event, "event.banner_attached", "event", event.id, "Updated event banner URL")
+    for recipient in set(
+        db.scalars(
+            select(Order.user_id).where(
+                Order.event_id == event.id, Order.status == "confirmed", Order.user_id.is_not(None)
+            )
+        )
+    ):
+        db.add(
+            Notification(
+                user_id=recipient,
+                kind="event_update",
+                title=event.title,
+                message=(
+                    "The organizer updated the event banner. Review the latest event information."
+                ),
+                data={"event_id": str(event.id)},
+            )
+        )
+
+    db.commit()
+    db.refresh(event)
+    return event

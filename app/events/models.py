@@ -74,12 +74,47 @@ class Event(UUIDTimestampMixin, Base):
     ticket_types: Mapped[list["TicketType"]] = relationship(lazy="selectin")
 
     @property
+    def is_duplicate(self) -> bool:
+        from sqlalchemy import select
+        from sqlalchemy.orm import object_session
+
+        db = object_session(self)
+        return bool(
+            db
+            and db.scalar(
+                select(AuditLog.id)
+                .where(AuditLog.event_id == self.id, AuditLog.action == "event.duplicated")
+                .limit(1)
+            )
+        )
+
+    @property
     def organizer_name(self) -> str:
         return self.organizer.full_name or "Organizer"
 
     @property
     def available_ticket_types(self):
         return [item for item in self.ticket_types if not item.is_hidden]
+
+    @property
+    def paid_review_status(self) -> str:
+        if not any(t.kind == "paid" for t in self.ticket_types):
+            return "not_applicable"
+        from sqlalchemy.orm import object_session
+
+        from app.events.paid_applications import application, fingerprint
+
+        db = object_session(self)
+        if db is None:
+            return "not_submitted"
+        review = application(db, self)
+        if review is None:
+            return "not_submitted"
+        if review.status in ("approved", "pending_review") and review.snapshot_hash != fingerprint(
+            db, self
+        ):
+            return "changes_required"
+        return review.status
 
     activation_fee_paid: Mapped[bool] = mapped_column(Boolean, default=False)
     paid_terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

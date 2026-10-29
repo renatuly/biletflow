@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from app.tickets.schemas import TicketTypeRead
 
@@ -31,7 +31,7 @@ class EventCreate(BaseModel):
     admission_type: str = Field(
         default="general_admission", pattern="^(general_admission|assigned_seating)$"
     )
-    refund_policy: str = "No refunds"
+    refund_policy: str = ""
 
     @model_validator(mode="after")
     def validate_dates(self):
@@ -45,6 +45,8 @@ class EventCreate(BaseModel):
 
 
 class EventUpdate(BaseModel):
+    venue: VenueWrite | None = None
+    time_zone: str | None = None
     title: str | None = Field(default=None, min_length=3, max_length=250)
     description: str | None = Field(default=None, min_length=3)
     category: str | None = None
@@ -58,6 +60,7 @@ class EventUpdate(BaseModel):
 
 
 class EventRead(BaseModel):
+    is_duplicate: bool = False
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     organizer_id: UUID
@@ -80,6 +83,7 @@ class EventRead(BaseModel):
     admission_type: str
     refund_policy: str
     paid_sales_status: str
+    paid_review_status: str = "not_applicable"
     created_at: datetime
 
 
@@ -99,3 +103,7 @@ class OrganizerProfileRead(BaseModel):
     verification_status: str
     payout_account_masked: str | None
     payout_verified: bool
+
+
+class EventImageCreate(BaseModel):
+    url: HttpUrl

@@ -45,6 +45,8 @@ class TicketTypeRead(BaseModel):
 
 
 class TicketRead(BaseModel):
+    order_id: UUID | None = None
+    can_request_refund: bool = False
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     order_id: UUID

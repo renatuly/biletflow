@@ -48,6 +48,7 @@ def event(client, organizer, title="Test event"):
             "registration_opens_at": (now - timedelta(hours=1)).isoformat(),
             "registration_closes_at": start.isoformat(),
             "capacity": 100,
+            "refund_policy": "Full refund until 48 hours before the event.",
         },
     )
     assert response.status_code == 201, response.text
@@ -72,7 +73,7 @@ def ticket_type(client, organizer, event_id, name="General", price_minor=0, quan
     return response.json()["id"]
 
 
-def activate_paid_sales(client, organizer, event_id):
+def activate_paid_sales(client, engine, organizer, event_id):
     assert client.put(
         f"{API}/organizer-profile", headers=organizer, json={"contact_name": "Organizer"}
     ).is_success
@@ -82,9 +83,17 @@ def activate_paid_sales(client, organizer, event_id):
         headers=organizer,
         params={"account_reference": "KZ000000001234"},
     ).is_success
-    for step in ("accept-terms", "activation-fee", "activate"):
+    for step in ("accept-terms", "activation-fee", "apply"):
         response = client.post(f"{API}/events/{event_id}/paid-sales/{step}", headers=organizer)
         assert response.is_success, response.text
+    # Paid events go on sale only after a platform administrator approves them.
+    admin = account(client, engine, f"admin-{event_id}@example.com", "platform_admin")
+    approved = client.post(
+        f"{API}/admin/paid-event-applications/{event_id}/approve", headers=admin, json={}
+    )
+    assert approved.is_success, approved.text
+    activated = client.post(f"{API}/events/{event_id}/paid-sales/activate", headers=organizer)
+    assert activated.is_success, activated.text
 
 
 def publish(client, organizer, event_id):

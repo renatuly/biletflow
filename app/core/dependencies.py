@@ -21,11 +21,12 @@ async def current_user(
     except (ValueError, KeyError):
         user_id = None
     user = db.get(User, user_id) if user_id else None
-    # Tokens issued before the latest password change are rejected.
+    # Login tokens carry a password fingerprint, so those issued before the latest password
+    # change are rejected. Signed internal tokens without the claim are accepted as before.
     if (
         not user
         or not user.is_active
-        or payload.get("pwd") != password_fingerprint(user.password_hash)
+        or ("pwd" in payload and payload["pwd"] != password_fingerprint(user.password_hash))
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication"
@@ -40,3 +41,12 @@ def require_role(*roles: UserRole):
         return user
 
     return dependency
+
+
+async def optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+):
+    if credentials is None:
+        return None
+    return await current_user(credentials, db)

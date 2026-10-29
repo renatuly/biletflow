@@ -29,6 +29,26 @@ class User(UUIDTimestampMixin, Base):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    @property
+    def support_access(self) -> bool:
+        if {"organizer", "platform_admin"}.intersection(self.roles):
+            return True
+        from sqlalchemy import select
+        from sqlalchemy.orm import object_session
+
+        from app.events.models import StaffAssignment
+
+        db = object_session(self)
+        return bool(
+            db
+            and any(
+                "support" in a.permissions
+                for a in db.scalars(
+                    select(StaffAssignment).where(StaffAssignment.user_id == self.id)
+                )
+            )
+        )
+
 
 class Notification(UUIDTimestampMixin, Base):
     __tablename__ = "notifications"
@@ -39,3 +59,14 @@ class Notification(UUIDTimestampMixin, Base):
     message: Mapped[str] = mapped_column(Text)
     data: Mapped[dict] = mapped_column(JSONB().with_variant(JSON(), "sqlite"), default=dict)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class OrganizerApplication(UUIDTimestampMixin, Base):
+    __tablename__ = "organizer_applications"
+
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), unique=True)
+    contact_name: Mapped[str] = mapped_column(String(200))
+    organization_name: Mapped[str] = mapped_column(String(200))
+    contact_phone: Mapped[str] = mapped_column(String(40))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="pending")

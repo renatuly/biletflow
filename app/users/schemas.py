@@ -30,6 +30,7 @@ class UserRead(BaseModel):
     full_name: str | None
     phone: str | None
     preferred_locale: str
+    support_access: bool = False
     roles: list[str]
     email_verified: bool
     is_active: bool

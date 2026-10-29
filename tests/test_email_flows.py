@@ -1,4 +1,4 @@
-from tests.factories import (
+from factories import (
     API,
     PASSWORD,
     account,
@@ -69,7 +69,7 @@ def test_ticket_confirmation_refund_and_cancellation_emails(client, engine, mail
     attendee = account(client, engine, "aida@example.com")
     event_id = event(client, organizer, "Spring Concert")
     paid = ticket_type(client, organizer, event_id, "VIP", price_minor=500_000)
-    activate_paid_sales(client, organizer, event_id)
+    activate_paid_sales(client, engine, organizer, event_id)
     publish(client, organizer, event_id)
     mailbox.clear()
 

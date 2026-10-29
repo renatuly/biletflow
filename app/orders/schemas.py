@@ -27,6 +27,7 @@ class OrderItemRead(BaseModel):
 
 
 class OrderRead(BaseModel):
+    can_cancel_registration: bool = False
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     event_id: UUID

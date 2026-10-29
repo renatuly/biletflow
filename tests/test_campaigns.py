@@ -1,11 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import update
-from sqlalchemy.orm import Session
-
-from app.orders.models import Order
-from tests.factories import (
+from factories import (
     API,
     account,
     activate_paid_sales,
@@ -16,6 +12,10 @@ from tests.factories import (
     publish,
     ticket_type,
 )
+from sqlalchemy import update
+from sqlalchemy.orm import Session
+
+from app.orders.models import Order
 
 
 def paid_event(client, engine):
@@ -25,7 +25,7 @@ def paid_event(client, engine):
     standard = ticket_type(client, organizer, event_id, "Standard", price_minor=1_000_000)
     vip = ticket_type(client, organizer, event_id, "VIP", price_minor=3_000_000)
     free = ticket_type(client, organizer, event_id, "Free entry")
-    activate_paid_sales(client, organizer, event_id)
+    activate_paid_sales(client, engine, organizer, event_id)
     publish(client, organizer, event_id)
     return organizer, attendee, event_id, standard, vip, free
 

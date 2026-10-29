@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -9,13 +9,14 @@ from app.core.database import get_db
 from app.core.dependencies import current_user
 from app.core.email import queue
 from app.events.models import Event, Venue
-from app.events.service import audit, require_event_manager
+from app.events.service import require_event_manager
 from app.notifications.emails import (
     order_confirmation_email,
     payment_failed_email,
     refund_email,
 )
-from app.orders.models import Order, OrderItem, OrderStatus, Payment, Refund
+from app.orders.models import Order, OrderStatus
+from app.orders.refunds import complete_refund
 from app.orders.schemas import (
     CheckoutCreate,
     OrderRead,
@@ -24,16 +25,8 @@ from app.orders.schemas import (
     QuoteRequest,
     RefundRequest,
 )
-from app.orders.service import (
-    complete_checkout,
-    create_checkout,
-    order_tickets,
-    price_checkout,
-    release_expired_orders,
-    release_order,
-)
-from app.tickets.models import Ticket, TicketStatus, TicketType
-from app.users.models import Notification, User
+from app.orders.service import complete_checkout, create_checkout, order_tickets, price_checkout
+from app.users.models import User
 
 router = APIRouter(tags=["orders", "checkout"])
 
@@ -43,9 +36,9 @@ def quote_checkout(
     data: QuoteRequest, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     """Price a selection (optionally with a promo code) without reserving inventory."""
-    now = datetime.now(UTC)
-    release_expired_orders(db, now)
-    pricing = price_checkout(db, data.event_id, data.items, data.promo_code, now)
+    pricing = price_checkout(
+        db, data.event_id, data.items, data.promo_code, user, datetime.now(UTC)
+    )
     return QuoteRead(
         subtotal_minor=pricing.subtotal_minor,
         discount_minor=pricing.discount_minor,
@@ -58,9 +51,12 @@ def quote_checkout(
 
 @router.post("/checkout/sessions", response_model=OrderRead, status_code=201)
 async def start_checkout(
-    data: CheckoutCreate, user: User = Depends(current_user), db: Session = Depends(get_db)
+    data: CheckoutCreate,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+    idempotency_key: str | None = Header(default=None),
 ):
-    return create_checkout(db, data, user)
+    return create_checkout(db, data, user, idempotency_key)
 
 
 @router.get("/checkout/sessions/{order_id}", response_model=OrderRead)
@@ -92,22 +88,6 @@ def finish_checkout(
         queue(background, order_confirmation_email(order, event, venue, order_tickets(db, order)))
     elif order.status == OrderStatus.PAYMENT_FAILED and order.total_minor > 0:
         queue(background, payment_failed_email(order, event))
-    return order
-
-
-@router.post("/checkout/sessions/{order_id}/cancel", response_model=OrderRead)
-def cancel_checkout(
-    order_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
-):
-    """Abandon a pending checkout and release its reserved tickets immediately."""
-    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
-    if not order or order.user_id != user.id:
-        raise HTTPException(404, detail="Checkout not found")
-    if order.status != OrderStatus.PENDING:
-        raise HTTPException(409, detail="Only pending checkouts can be cancelled")
-    release_order(db, order, OrderStatus.CANCELLED)
-    db.commit()
-    db.refresh(order)
     return order
 
 
@@ -171,45 +151,13 @@ def refund_order(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
+    if not data.reason.strip():
+        raise HTTPException(422, detail="Refund reason is required")
+    refund = complete_refund(db, order_id, data.reason.strip(), user)
     order = db.get(Order, order_id)
-    if not order:
-        raise HTTPException(404, detail="Order not found")
-    event = require_event_manager(db, order.event_id, user)
-    if order.status != "confirmed":
-        raise HTTPException(409, detail="Only confirmed orders can be refunded")
-    payment = db.scalar(
-        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
-    )
-    refund = Refund(
-        order_id=order.id,
-        payment_id=payment.id if payment else None,
-        initiated_by=user.id,
-        amount_minor=order.total_minor,
-        reason=data.reason,
-    )
-    db.add(refund)
-    items = list(db.scalars(select(OrderItem).where(OrderItem.order_id == order.id)).all())
-    for item in items:
-        ticket_type = db.get(TicketType, item.ticket_type_id)
-        ticket_type.refunded_count += item.quantity
-        ticket_type.sold_count -= item.quantity
-    for ticket in db.scalars(select(Ticket).where(Ticket.order_item_id.in_([i.id for i in items]))):
-        ticket.status = TicketStatus.REFUNDED
-    order.status = "refunded"
-    db.add(
-        Notification(
-            user_id=order.user_id,
-            kind="refund_completion",
-            title="Refund completed",
-            message="Your demonstration refund was completed.",
-        )
-    )
-    audit(
-        db, user, event, "order.refunded", "order", order.id, "Full demonstration refund completed"
-    )
     db.commit()
     db.refresh(refund)
-    queue(background, refund_email(order, event, refund.amount_minor))
+    queue(background, refund_email(order, db.get(Event, order.event_id), refund.amount_minor))
     return {
         "id": str(refund.id),
         "status": refund.status,
@@ -217,3 +165,35 @@ def refund_order(
         "currency": order.currency,
         "is_simulation": True,
     }
+
+
+@router.post("/checkout/sessions/{order_id}/cancel", response_model=OrderRead)
+def cancel_checkout(
+    order_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    order = db.get(Order, order_id)
+    if not order or order.user_id != user.id:
+        raise HTTPException(404, detail="Checkout not found")
+    db.scalar(select(Event).where(Event.id == order.event_id).with_for_update())
+    order = db.scalar(
+        select(Order)
+        .where(Order.id == order_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    from datetime import UTC, datetime
+
+    from app.orders.reservations import release
+    from app.platform.operations_service import utc
+
+    if order.status == "pending":
+        release(
+            db,
+            order,
+            "expired" if utc(order.expires_at) <= datetime.now(UTC) else "cancelled",
+            user,
+        )
+        db.commit()
+    elif order.status not in ("cancelled", "expired"):
+        raise HTTPException(409, detail="This checkout can no longer be abandoned")
+    return order
