@@ -1,11 +1,15 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, UUIDTimestampMixin
+
+if TYPE_CHECKING:
+    from app.orders.models import OrderItem
 
 
 class TicketStatus(StrEnum):
@@ -48,6 +52,11 @@ class Ticket(UUIDTimestampMixin, Base):
     section: Mapped[str | None] = mapped_column(String(80))
     row: Mapped[str | None] = mapped_column(String(30))
     seat: Mapped[str | None] = mapped_column(String(30))
+    order_item: Mapped["OrderItem"] = relationship(lazy="selectin", viewonly=True)
+
+    @property
+    def order_id(self) -> UUID:
+        return self.order_item.order_id
 
 
 class CheckInRecord(UUIDTimestampMixin, Base):

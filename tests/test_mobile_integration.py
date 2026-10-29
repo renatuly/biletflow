@@ -34,6 +34,11 @@ def test_mobile_purchase_and_checkin():
                     },
                 )
                 assert response.status_code == 201, response.text
+                verified = client.post(
+                    "/api/v1/auth/verify-email",
+                    json={"token": response.headers["X-Demo-Verification-Token"]},
+                )
+                assert verified.json()["email_verified"] is True
                 if role:
                     with Session(engine) as db:
                         user = db.scalar(select(User).where(User.email == email))

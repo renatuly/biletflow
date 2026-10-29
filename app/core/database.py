@@ -2,7 +2,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, MetaData, create_engine
+from sqlalchemy import DateTime, MetaData, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from app.core.config import get_settings
@@ -47,3 +47,33 @@ async def get_db() -> Generator:
 
 def create_schema() -> None:
     Base.metadata.create_all(bind=engine)
+    add_missing_columns()
+
+
+def add_missing_columns() -> None:
+    """Additive-only schema sync for databases created before a column existed.
+
+    ``create_all`` never alters existing tables. New columns must therefore be nullable or
+    declare a ``server_default``. Renames, drops, and type changes need a real migration.
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                column_type = column.type.compile(dialect=engine.dialect)
+                default = ""
+                if column.server_default is not None:
+                    value = column.server_default.arg
+                    if isinstance(value, str):
+                        value = "'" + value.replace("'", "''") + "'"
+                    else:
+                        value = value.compile(dialect=engine.dialect)
+                    default = f" DEFAULT {value}"
+                statement = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'
+                connection.execute(text(statement + default))

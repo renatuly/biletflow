@@ -1,10 +1,19 @@
 services:
   api:
     build: .
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_DATABASE_URL: postgresql+psycopg://biletflow:biletflow@db:5432/biletflow
-      APP_SECRET_KEY: local-demonstration-secret-change-before-deployment
-      APP_FRONTEND_URL: http://localhost:3000
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-local-demonstration-secret-change-before-deployment}
+      APP_FRONTEND_URL: ${APP_FRONTEND_URL:-http://localhost:3000}
+      # Defaults deliver every email to Mailpit (http://localhost:8025). Set EMAIL_BACKEND and
+      # SMTP_* in .env to use a real provider instead.
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURITY: ${SMTP_SECURITY:-none}
     ports:
       - "8000:8000"
     depends_on:
@@ -24,6 +33,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Local inbox for demonstration emails: web UI at http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "8025:8025"
+      - "1025:1025"
 
 volumes:
   postgres_data:

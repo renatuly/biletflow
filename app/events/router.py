@@ -1,13 +1,14 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.dependencies import current_user, require_role
+from app.core.email import queue
 from app.events.models import (
     AuditLog,
     Event,
@@ -24,7 +25,8 @@ from app.events.schemas import (
     OrganizerProfileWrite,
 )
 from app.events.service import audit, publish_event, require_event_manager
-from app.tickets.models import TicketType
+from app.notifications.emails import event_cancelled_email
+from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import User, UserRole
 
 router = APIRouter(tags=["events"])
@@ -87,6 +89,8 @@ async def publish(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     event = require_event_manager(db, event_id, user)
+    if not user.email_verified and UserRole.PLATFORM_ADMIN not in user.roles:
+        raise HTTPException(403, detail="Verify your email address before publishing events")
     if not db.scalar(select(TicketType).where(TicketType.event_id == event.id)):
         raise HTTPException(409, detail="Create at least one ticket type before publishing")
     return publish_event(db, event, user)
@@ -103,15 +107,37 @@ def unpublish(event_id: UUID, user: User = Depends(current_user), db: Session = 
 
 
 @router.post("/events/{event_id}/cancel", response_model=EventRead)
-def cancel(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def cancel(
+    event_id: UUID,
+    background: BackgroundTasks,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
     event = require_event_manager(db, event_id, user)
+    if event.status == "cancelled":
+        return event
     event.status = "cancelled"
     event.paid_sales_status = "suspended"
+    holders: dict[str, str] = {}
+    for ticket in db.scalars(
+        select(Ticket).where(Ticket.event_id == event.id, Ticket.status == TicketStatus.VALID)
+    ):
+        ticket.status = TicketStatus.CANCELLED
+        holders.setdefault(ticket.attendee_email, ticket.attendee_name)
     audit(
-        db, user, event, "event.cancelled", "event", event.id, "Event cancelled and sales stopped"
+        db,
+        user,
+        event,
+        "event.cancelled",
+        "event",
+        event.id,
+        f"Event cancelled, sales stopped, {len(holders)} ticket holder(s) notified",
     )
     db.commit()
     db.refresh(event)
+    queue(
+        background, *(event_cancelled_email(name, email, event) for email, name in holders.items())
+    )
     return event
 
 

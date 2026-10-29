@@ -1,20 +1,59 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import current_user
-from app.events.models import Event
+from app.core.email import queue
+from app.events.models import Event, Venue
 from app.events.service import audit, require_event_manager
-from app.orders.models import Order, OrderItem, Payment, Refund
-from app.orders.schemas import CheckoutCreate, OrderRead, PaymentSimulation, RefundRequest
-from app.orders.service import complete_checkout, create_checkout
+from app.notifications.emails import (
+    order_confirmation_email,
+    payment_failed_email,
+    refund_email,
+)
+from app.orders.models import Order, OrderItem, OrderStatus, Payment, Refund
+from app.orders.schemas import (
+    CheckoutCreate,
+    OrderRead,
+    PaymentSimulation,
+    QuoteRead,
+    QuoteRequest,
+    RefundRequest,
+)
+from app.orders.service import (
+    complete_checkout,
+    create_checkout,
+    order_tickets,
+    price_checkout,
+    release_expired_orders,
+    release_order,
+)
 from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import Notification, User
 
 router = APIRouter(tags=["orders", "checkout"])
+
+
+@router.post("/promo-codes/validate", response_model=QuoteRead)
+def quote_checkout(
+    data: QuoteRequest, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """Price a selection (optionally with a promo code) without reserving inventory."""
+    now = datetime.now(UTC)
+    release_expired_orders(db, now)
+    pricing = price_checkout(db, data.event_id, data.items, data.promo_code, now)
+    return QuoteRead(
+        subtotal_minor=pricing.subtotal_minor,
+        discount_minor=pricing.discount_minor,
+        processing_fee_minor=pricing.processing_fee_minor,
+        total_minor=pricing.total_minor,
+        promo_code=pricing.promo.campaign.code if pricing.promo else None,
+        campaign_name=pricing.promo.campaign.name if pricing.promo else None,
+    )
 
 
 @router.post("/checkout/sessions", response_model=OrderRead, status_code=201)
@@ -35,16 +74,59 @@ def read_checkout(
 
 
 @router.post("/checkout/sessions/{order_id}/complete", response_model=OrderRead)
-async def finish_checkout(
+def finish_checkout(
     order_id: UUID,
     data: PaymentSimulation,
+    background: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     order = db.get(Order, order_id)
     if not order or order.user_id != user.id:
         raise HTTPException(404, detail="Checkout not found")
-    return complete_checkout(db, order, user, data.outcome)
+    already_confirmed = order.status == OrderStatus.CONFIRMED
+    order = complete_checkout(db, order, user, data.outcome)
+    event = db.get(Event, order.event_id)
+    if order.status == OrderStatus.CONFIRMED and not already_confirmed:
+        venue = db.get(Venue, event.venue_id)
+        queue(background, order_confirmation_email(order, event, venue, order_tickets(db, order)))
+    elif order.status == OrderStatus.PAYMENT_FAILED and order.total_minor > 0:
+        queue(background, payment_failed_email(order, event))
+    return order
+
+
+@router.post("/checkout/sessions/{order_id}/cancel", response_model=OrderRead)
+def cancel_checkout(
+    order_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """Abandon a pending checkout and release its reserved tickets immediately."""
+    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
+    if not order or order.user_id != user.id:
+        raise HTTPException(404, detail="Checkout not found")
+    if order.status != OrderStatus.PENDING:
+        raise HTTPException(409, detail="Only pending checkouts can be cancelled")
+    release_order(db, order, OrderStatus.CANCELLED)
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@router.post("/orders/{order_id}/resend-confirmation", status_code=202)
+def resend_confirmation(
+    order_id: UUID,
+    background: BackgroundTasks,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    order = db.get(Order, order_id)
+    if not order or order.user_id != user.id:
+        raise HTTPException(404, detail="Order not found")
+    if order.status != OrderStatus.CONFIRMED:
+        raise HTTPException(409, detail="Only confirmed orders have tickets to send")
+    event = db.get(Event, order.event_id)
+    venue = db.get(Venue, event.venue_id)
+    queue(background, order_confirmation_email(order, event, venue, order_tickets(db, order)))
+    return {"message": f"Tickets sent to {order.attendee_email}"}
 
 
 @router.get("/orders", response_model=list[OrderRead])
@@ -85,6 +167,7 @@ def event_orders(event_id: UUID, user: User = Depends(current_user), db: Session
 def refund_order(
     order_id: UUID,
     data: RefundRequest,
+    background: BackgroundTasks,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -126,6 +209,7 @@ def refund_order(
     )
     db.commit()
     db.refresh(refund)
+    queue(background, refund_email(order, event, refund.amount_minor))
     return {
         "id": str(refund.id),
         "status": refund.status,

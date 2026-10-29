@@ -47,6 +47,8 @@ class TicketTypeRead(BaseModel):
 class TicketRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    order_id: UUID
+    order_item_id: UUID
     event_id: UUID
     ticket_type_id: UUID
     qr_credential: str

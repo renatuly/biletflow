@@ -1,7 +1,8 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base, UUIDTimestampMixin
@@ -20,6 +21,11 @@ class Campaign(UUIDTimestampMixin, Base):
     max_redemptions: Mapped[int] = mapped_column(Integer)
     redemption_count: Mapped[int] = mapped_column(Integer, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # None means the campaign applies to every ticket type of the event.
+    applicable_ticket_type_ids: Mapped[list[str] | None] = mapped_column(
+        JSONB().with_variant(JSON(), "sqlite")
+    )
+    visit_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 class PromoRedemption(UUIDTimestampMixin, Base):

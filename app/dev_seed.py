@@ -1,11 +1,14 @@
 """Create deterministic local data for exercising every mobile-app role."""
 
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
 from app import models  # noqa: F401 - registers all ORM metadata
+from app.campaigns.models import Campaign
+from app.campaigns.service import campaign_link
 from app.core.config import get_settings
 from app.core.database import SessionLocal, create_schema
 from app.core.security import create_qr_credential, hash_password
@@ -15,6 +18,7 @@ from app.tickets.models import CheckInRecord, Ticket, TicketStatus, TicketType
 from app.users.models import User
 
 DEMO_PASSWORD = "DemoPass123!"
+DEMO_PROMO_CODE = "BILETFLOW20"
 CORE_USERS = (
     ("attendee.demo@example.com", "Demo Attendee", ["attendee"]),
     ("organizer.demo@example.com", "Demo Organizer", ["attendee", "organizer"]),
@@ -477,6 +481,28 @@ def ensure_registration(
     return True
 
 
+def ensure_demo_campaign(db, event: Event, now: datetime) -> Campaign:
+    """A ready-to-scan 20% campaign so the Campaign QR flow can be demonstrated."""
+    campaign = db.scalar(select(Campaign).where(Campaign.code == DEMO_PROMO_CODE))
+    if campaign is None:
+        campaign = Campaign(
+            event_id=event.id,
+            name="Student launch offer",
+            code=DEMO_PROMO_CODE,
+            opaque_token=secrets.token_urlsafe(24),
+            discount_type="percentage",
+            discount_value=20,
+            max_redemptions=50,
+        )
+        db.add(campaign)
+    campaign.event_id = event.id
+    campaign.enabled = True
+    campaign.valid_from = now - timedelta(days=1)
+    campaign.valid_until = event.starts_at
+    db.flush()
+    return campaign
+
+
 def seed() -> None:
     settings = get_settings()
     if settings.app_env == "production":
@@ -499,10 +525,13 @@ def seed() -> None:
         staff = users["staff.demo@example.com"]
         guests = [users[email] for email, _, _ in guest_users]
         created_registrations = 0
+        demo_campaign = None
         for spec in EVENTS:
             event, general = upsert_event(db, spec, users, now)
             if spec.organizer_email == "organizer.demo@example.com":
                 ensure_staff_assignment(db, event, staff)
+                if demo_campaign is None and spec.price_minor > 0 and spec.status == "published":
+                    demo_campaign = ensure_demo_campaign(db, event, now)
             if spec.registrations == 0:
                 continue
             registrants = guests[: spec.registrations]
@@ -535,6 +564,8 @@ def seed() -> None:
     print("Primary demo accounts:")
     for email, _, _ in CORE_USERS[:4]:
         print(f"  {email} / {DEMO_PASSWORD}")
+    if demo_campaign:
+        print(f"Demo promo code {DEMO_PROMO_CODE}: {campaign_link(demo_campaign)}")
 
 
 if __name__ == "__main__":

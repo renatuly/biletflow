@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -5,12 +6,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.campaigns.models import Campaign
+from app.campaigns.service import campaign_state, held_redemptions
 from app.core.database import get_db
 from app.core.dependencies import current_user, require_role
 from app.events.models import Event
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
-from app.orders.models import Order, Refund
+from app.orders.models import Order, OrderItem, Refund
 from app.tickets.models import Ticket, TicketStatus, TicketType
 from app.users.models import User, UserRole
 from app.users.schemas import UserRead
@@ -96,18 +98,108 @@ def sales_series(event_id: UUID, user: User = Depends(current_user), db: Session
 def campaign_analytics(
     event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
+    """Exact campaign performance from confirmed and refunded BiletFlow orders."""
     require_event_manager(db, event_id, user)
-    campaigns = db.scalars(select(Campaign).where(Campaign.event_id == event_id)).all()
-    return [
-        {
-            "id": str(c.id),
-            "name": c.name,
-            "code": c.code,
-            "redemptions": c.redemption_count,
-            "maximum": c.max_redemptions,
-        }
-        for c in campaigns
-    ]
+    campaigns = db.scalars(
+        select(Campaign).where(Campaign.event_id == event_id).order_by(Campaign.created_at)
+    ).all()
+    tickets = (
+        select(OrderItem.order_id, func.sum(OrderItem.quantity).label("quantity"))
+        .group_by(OrderItem.order_id)
+        .subquery()
+    )
+    rows = db.execute(
+        select(
+            Order.campaign_id,
+            Order.status,
+            func.count(Order.id),
+            func.coalesce(func.sum(tickets.c.quantity), 0),
+            func.coalesce(func.sum(Order.subtotal_minor), 0),
+            func.coalesce(func.sum(Order.discount_minor), 0),
+        )
+        .join(tickets, tickets.c.order_id == Order.id)
+        .where(
+            Order.event_id == event_id,
+            Order.campaign_id.is_not(None),
+            Order.status.in_(["confirmed", "refunded"]),
+        )
+        .group_by(Order.campaign_id, Order.status)
+    ).all()
+    totals: dict = {}
+    for campaign_id, status, orders, quantity, gross, discount in rows:
+        entry = totals.setdefault(
+            campaign_id, {"confirmed": (0, 0, 0, 0), "refunded": (0, 0, 0, 0)}
+        )
+        entry[status] = (orders, quantity, gross, discount)
+    result = []
+    now = datetime.now(UTC)
+    for campaign in campaigns:
+        entry = totals.get(campaign.id, {"confirmed": (0, 0, 0, 0), "refunded": (0, 0, 0, 0)})
+        orders, quantity, gross, discount = entry["confirmed"]
+        refunded_orders, _, refunded_gross, refunded_discount = entry["refunded"]
+        result.append(
+            {
+                "id": str(campaign.id),
+                "name": campaign.name,
+                "code": campaign.code,
+                "state": campaign_state(campaign, now, held_redemptions(db, campaign)),
+                "visits": campaign.visit_count,
+                "redemptions": campaign.redemption_count,
+                "maximum": campaign.max_redemptions,
+                "orders": orders,
+                "tickets_sold": quantity,
+                "gross_revenue_minor": gross,
+                "discount_minor": discount,
+                "net_revenue_minor": gross - discount,
+                "refunded_orders": refunded_orders,
+                "refunded_minor": refunded_gross - refunded_discount,
+                "conversion_rate": round(orders * 100 / campaign.visit_count, 2)
+                if campaign.visit_count
+                else None,
+                "currency": "KZT",
+                "is_simulation": True,
+            }
+        )
+    return result
+
+
+@router.get("/organizer/analytics/ticket-types")
+def ticket_type_analytics(
+    event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    require_event_manager(db, event_id, user)
+    sums = {
+        row[0]: row[1:]
+        for row in db.execute(
+            select(
+                OrderItem.ticket_type_id,
+                func.coalesce(func.sum(OrderItem.quantity * OrderItem.unit_price_minor), 0),
+                func.coalesce(func.sum(OrderItem.discount_minor), 0),
+            )
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(Order.event_id == event_id, Order.status == "confirmed")
+            .group_by(OrderItem.ticket_type_id)
+        ).all()
+    }
+    types = db.scalars(select(TicketType).where(TicketType.event_id == event_id)).all()
+    result = []
+    for ticket_type in types:
+        gross, discount = sums.get(ticket_type.id, (0, 0))
+        result.append(
+            {
+                "ticket_type_id": str(ticket_type.id),
+                "name": ticket_type.name,
+                "capacity": ticket_type.quantity,
+                "tickets_sold": ticket_type.sold_count,
+                "reserved": ticket_type.reserved_count,
+                "refunded": ticket_type.refunded_count,
+                "gross_sales_minor": gross,
+                "discounts_minor": discount,
+                "net_revenue_minor": gross - discount,
+                "currency": "KZT",
+            }
+        )
+    return result
 
 
 @router.get("/admin/users", response_model=list[UserRead])
@@ -186,3 +278,35 @@ def operations(
         "currency": "KZT",
         "financial_data_is_simulated": True,
     }
+
+
+@router.get("/admin/campaigns")
+def admin_campaigns(
+    q: str | None = None,
+    admin: User = Depends(require_role(UserRole.PLATFORM_ADMIN)),
+    db: Session = Depends(get_db),
+):
+    """Promotional-code activity across the platform, most recent first."""
+    statement = select(Campaign, Event.title).join(Event, Event.id == Campaign.event_id)
+    if q:
+        statement = statement.where(Campaign.code.ilike(f"%{q}%") | Event.title.ilike(f"%{q}%"))
+    now = datetime.now(UTC)
+    return [
+        {
+            "id": str(campaign.id),
+            "event_id": str(campaign.event_id),
+            "event_title": title,
+            "name": campaign.name,
+            "code": campaign.code,
+            "discount_type": campaign.discount_type,
+            "discount_value": campaign.discount_value,
+            "state": campaign_state(campaign, now, held_redemptions(db, campaign)),
+            "visits": campaign.visit_count,
+            "redemptions": campaign.redemption_count,
+            "maximum": campaign.max_redemptions,
+            "created_at": campaign.created_at,
+        }
+        for campaign, title in db.execute(
+            statement.order_by(Campaign.created_at.desc()).limit(200)
+        ).all()
+    ]

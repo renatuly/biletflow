@@ -18,6 +18,7 @@ dependencies = [
     "qrcode[pil]>=8.0,<9.0",
     "reportlab>=4.2,<5.0",
     "sqlalchemy>=2.0,<3.0",
+    "tzdata>=2024.1",
     "uvicorn[standard]>=0.32,<1.0",
 ]
 
@@ -41,3 +42,7 @@ ignore = ["B008"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.ruff.lint.per-file-ignores]
+# HTML email markup reads better unwrapped.
+"app/notifications/emails.py" = ["E501"]

@@ -38,10 +38,21 @@ def _decode_part(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def create_token(subject: str, purpose: str = "access", minutes: int | None = None) -> str:
+def password_fingerprint(password_hash: str) -> str:
+    """Short digest of the stored hash; changes whenever the password changes."""
+    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+
+
+def create_token(
+    subject: str,
+    purpose: str = "access",
+    minutes: int | None = None,
+    claims: dict[str, Any] | None = None,
+) -> str:
     settings = get_settings()
     lifetime = minutes or settings.app_access_token_minutes
     payload = {
+        **(claims or {}),
         "sub": subject,
         "purpose": purpose,
         "exp": int((datetime.now(UTC) + timedelta(minutes=lifetime)).timestamp()),

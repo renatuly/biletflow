@@ -162,6 +162,20 @@ Login response:
 }
 ```
 
+Implemented email behaviour:
+
+- Registration sends a verification link to `{APP_FRONTEND_URL}/verify-email?token=…`
+  (valid `APP_EMAIL_VERIFICATION_HOURS`, bound to the address). Publishing an event
+  requires a verified email.
+- `resend-verification` and `forgot-password` always return `202` with the same body,
+  so they cannot reveal whether an account exists.
+- Reset links (`/reset-password?token=…`) expire after `APP_PASSWORD_RESET_MINUTES` and
+  are single-use: the token is bound to the current password hash. A successful reset
+  verifies the email, signs out every existing session, and sends a "password changed"
+  notice.
+- When `EMAIL_BACKEND` is not `smtp` (and not in production), tokens are also returned
+  in `X-Demo-Verification-Token` / `X-Demo-Reset-Token` headers for local testing.
+
 ## 4. Users and organizer profiles
 
 | Method | Path | Access | Purpose |
@@ -332,6 +346,13 @@ an order only after a zero-value registration succeeds or payment is confirmed.
 Order statuses: `pending`, `confirmed`, `cancelled`, `partially_refunded`,
 `refunded`, `payment_failed`, and `expired`.
 
+Implemented additions: `POST /checkout/sessions/{id}/cancel` releases a pending
+checkout immediately; abandoned checkouts expire after `APP_TICKET_HOLD_MINUTES` and
+their inventory and promo holds are released. A confirmed checkout emails the attendee
+a confirmation with each ticket's QR inline and a printable PDF per ticket attached
+(`POST /orders/{id}/resend-confirmation` sends it again). Payment failures, refunds,
+and event cancellations also send email; cancelling an event cancels its valid tickets.
+
 ## 11. Payments, refunds, and payouts
 
 | Method | Path | Access | Purpose |
@@ -402,6 +423,32 @@ one successful check-in.
 Discount types are `percentage` and `fixed_kzt`. The backend validates dates,
 ticket applicability, maximum redemptions, and totals. Campaign URLs contain only
 an opaque token. They never contain a trusted discount amount.
+
+Implemented behaviour:
+
+- `POST /promo-codes/validate` takes `{event_id, items, promo_code}` and returns a
+  quote (`subtotal_minor`, `discount_minor`, `processing_fee_minor`, `total_minor`,
+  `promo_code`) without reserving inventory. Checkout repeats the same calculation.
+- `applicable_ticket_type_ids` (null = all paid types) limits which tickets are
+  discounted; the discount is allocated to order items. Fixed discounts apply once per
+  order and never exceed the eligible subtotal.
+- One order consumes one redemption. Pending checkouts hold a redemption, and
+  completion consumes it with an atomic conditional update before tickets are issued,
+  so the limit cannot be exceeded under concurrency.
+- Rejections return `422` with a readable `detail`, e.g. "Promo code X has expired.",
+  "has reached its redemption limit", "has been disabled", "does not apply to the
+  selected tickets".
+- Code and discount are immutable after creation; `PATCH` changes name, dates,
+  limit (not below redemptions already used or held), applicable types, and `enabled`.
+  Enabling/disabling is recorded in the event history.
+- `GET /campaigns/resolve/{token}` counts a visit and returns `state`
+  (`active|scheduled|expired|exhausted|disabled|event_cancelled`), a `message`, and
+  `promo_code` only when the code is currently usable.
+- The Campaign QR is purple, framed, and labelled "PROMO OFFER · Not an admission
+  ticket". Admission endpoints reject it with `CAMPAIGN_QR_NOT_ADMISSION`.
+- `GET /organizer/analytics/campaigns?event_id=` returns visits, redemptions, orders,
+  tickets sold, gross revenue, discount, net revenue, refunds, and conversion rate.
+  `GET /admin/campaigns` lists promo activity platform-wide.
 
 ## 15. Support cases and messages
 

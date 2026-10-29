@@ -37,10 +37,35 @@ For PostgreSQL-based demonstration deployment:
 docker compose up --build
 ```
 
+Compose also starts [Mailpit](https://mailpit.axllent.org/); every email the API sends
+(verification, password reset, ticket confirmations with PDF tickets, refunds,
+cancellations) appears at `http://localhost:8025`.
+
+## Email
+
+`EMAIL_BACKEND` selects delivery:
+
+- `console` (default): emails are printed to the API log. Verification and reset tokens
+  are also returned in `X-Demo-Verification-Token` / `X-Demo-Reset-Token` headers.
+- `smtp`: delivery through `SMTP_HOST`/`SMTP_PORT` with `SMTP_SECURITY` set to
+  `starttls` (587), `ssl` (465) or `none` (local relays). Required in production.
+
+Links in emails point to `APP_FRONTEND_URL`. Email is sent after the response with
+FastAPI background tasks, so a slow or failing SMTP server never blocks checkout;
+delivery errors are logged.
+
+## Schema changes
+
+Tables are created on startup. Columns added later are appended automatically when
+they are nullable or have a server default (see `add_missing_columns`). Other schema
+changes need a migration or a fresh database.
+
 ## Test
 
 ```bash
 pytest
+# Optionally against an empty PostgreSQL database:
+TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/biletflow_test pytest
 ```
 
 ## Current scope

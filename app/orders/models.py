@@ -1,11 +1,15 @@
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, UUIDTimestampMixin
+
+if TYPE_CHECKING:
+    from app.campaigns.models import Campaign
 
 
 class OrderStatus(StrEnum):
@@ -32,6 +36,12 @@ class Order(UUIDTimestampMixin, Base):
     total_minor: Mapped[int] = mapped_column(Integer, default=0)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     campaign_id: Mapped[UUID | None] = mapped_column(ForeignKey("campaigns.id"))
+    items: Mapped[list["OrderItem"]] = relationship(lazy="selectin", viewonly=True)
+    campaign: Mapped["Campaign | None"] = relationship(lazy="selectin", viewonly=True)
+
+    @property
+    def promo_code(self) -> str | None:
+        return self.campaign.code if self.campaign else None
 
 
 class OrderItem(UUIDTimestampMixin, Base):

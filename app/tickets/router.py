@@ -1,23 +1,20 @@
-import io
 from datetime import UTC, datetime
 from uuid import UUID
 
-import qrcode
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response, StreamingResponse
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import current_user
+from app.core.security import parse_qr_credential
 from app.events.models import Event, StaffAssignment, Venue
 from app.events.schemas import EventRead
 from app.events.service import audit, require_event_manager
 from app.tickets.models import CheckInRecord, Ticket, TicketStatus, TicketType
 from app.tickets.schemas import TicketRead, TicketTypeCreate, TicketTypeRead
+from app.tickets.service import admission_qr_png, render_ticket_pdf
 from app.users.models import User
 
 router = APIRouter(tags=["tickets"])
@@ -123,10 +120,7 @@ def ticket_event(
 @router.get("/tickets/{ticket_id}/qr")
 def ticket_qr(ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
     ticket, _ = authorized_ticket(db, ticket_id, user)
-    image = qrcode.make(ticket.qr_credential)
-    stream = io.BytesIO()
-    image.save(stream, format="PNG")
-    return Response(stream.getvalue(), media_type="image/png")
+    return Response(admission_qr_png(ticket.qr_credential), media_type="image/png")
 
 
 @router.get("/tickets/{ticket_id}/pdf")
@@ -134,41 +128,11 @@ async def ticket_pdf(
     ticket_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
     ticket, event = authorized_ticket(db, ticket_id, user)
-    ticket_type = db.get(TicketType, ticket.ticket_type_id)
-    venue = db.get(Venue, event.venue_id)
-    qr_stream = io.BytesIO()
-    qrcode.make(ticket.qr_credential).save(qr_stream, format="PNG")
-    qr_stream.seek(0)
-    output = io.BytesIO()
-    page = canvas.Canvas(output, pagesize=A4)
-    width, height = A4
-    page.setTitle(f"BiletFlow Ticket {ticket.id}")
-    page.setFont("Helvetica-Bold", 22)
-    page.drawString(50, height - 70, event.title)
-    page.setFont("Helvetica", 12)
-    lines = [
-        f"Date: {event.starts_at.isoformat()}",
-        f"Venue: {venue.name}, {venue.address}",
-        f"Ticket: {ticket_type.name}",
-        f"Attendee: {ticket.attendee_name}",
-        f"Ticket ID: {ticket.id}",
-    ]
-    if ticket.seat:
-        lines.append(f"Seat: {ticket.section or ''} {ticket.row or ''} {ticket.seat}")
-    for index, line in enumerate(lines):
-        page.drawString(50, height - 110 - index * 22, line)
-    page.drawImage(ImageReader(qr_stream), 50, 220, width=240, height=240, preserveAspectRatio=True)
-    page.setFont("Helvetica", 9)
-    page.drawString(
-        50,
-        200,
-        "This QR code is the admission credential. Printed and digital copies admit only once.",
+    pdf = render_ticket_pdf(
+        ticket, event, db.get(Venue, event.venue_id), db.get(TicketType, ticket.ticket_type_id)
     )
-    page.showPage()
-    page.save()
-    output.seek(0)
-    return StreamingResponse(
-        output,
+    return Response(
+        pdf,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="ticket-{ticket.id}.pdf"'},
     )
@@ -192,6 +156,16 @@ def assigned_event(db: Session, event_id: UUID, user: User) -> Event:
     return event
 
 
+REJECTION_MESSAGES = {
+    "CAMPAIGN_QR_NOT_ADMISSION": "This is a promotional Campaign QR code, not an admission ticket.",
+    "INVALID_QR": "This QR code is not a valid BiletFlow ticket.",
+}
+
+
+def rejection_reason(qr_payload: str) -> str:
+    return "CAMPAIGN_QR_NOT_ADMISSION" if "/campaign/" in qr_payload else "INVALID_QR"
+
+
 @router.get("/check-in/events", response_model=list[EventRead])
 def checkin_events(user: User = Depends(current_user), db: Session = Depends(get_db)):
     ids = select(StaffAssignment.event_id).where(StaffAssignment.user_id == user.id)
@@ -207,17 +181,11 @@ def validate_admission(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    from app.core.security import parse_qr_credential
-
     assigned_event(db, event_id, user)
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
-        return {
-            "result": "invalid",
-            "reason": "CAMPAIGN_QR_NOT_ADMISSION"
-            if not qr_payload.startswith("ticket.")
-            else "INVALID_QR",
-        }
+        reason = rejection_reason(qr_payload)
+        return {"result": "invalid", "reason": reason, "message": REJECTION_MESSAGES[reason]}
     ticket = db.get(Ticket, ticket_id)
     if not ticket or ticket.event_id != event_id:
         return {"result": "wrong_event"}
@@ -241,12 +209,10 @@ async def admit(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    from app.core.security import parse_qr_credential
-
     event = assigned_event(db, event_id, user)
     ticket_id = parse_qr_credential(qr_payload)
     if not ticket_id:
-        raise HTTPException(409, detail="Invalid admission QR")
+        raise HTTPException(409, detail=REJECTION_MESSAGES[rejection_reason(qr_payload)])
     ticket = db.scalar(select(Ticket).where(Ticket.id == UUID(ticket_id)).with_for_update())
     if not ticket or ticket.event_id != event.id:
         raise HTTPException(409, detail="Ticket is for another event")

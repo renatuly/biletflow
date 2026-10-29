@@ -47,7 +47,7 @@ class TokenRequest(BaseModel):
     token: str
 
 
-class PasswordResetRequest(BaseModel):
+class EmailRequest(BaseModel):
     email: EmailStr
 
 
