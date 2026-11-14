@@ -4,9 +4,14 @@ Messages are fully rendered inside the request (while the database session is op
 delivered afterwards with FastAPI ``BackgroundTasks`` so SMTP latency never blocks checkout.
 """
 
+import base64
+import json
 import logging
+import re
 import smtplib
 import ssl
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
@@ -72,6 +77,57 @@ def _build_message(email: OutgoingEmail) -> EmailMessage:
     return message
 
 
+BREVO_URL = "https://api.brevo.com/v3/smtp/email"
+_CID_IMG = re.compile(r'<img[^>]*src="cid:[^"]+"[^>]*>')
+
+
+def _brevo_payload(email: OutgoingEmail) -> dict:
+    """Brevo's API has no inline (cid:) images, so those become ordinary attachments."""
+    settings = get_settings()
+    html = email.html
+    if any(a.content_id for a in email.attachments):
+        html = _CID_IMG.sub(
+            '<div style="margin-top:8px;font-size:12px;color:#6e6e73">'
+            "QR code attached to this email</div>",
+            html,
+        )
+    payload: dict = {
+        "sender": {"name": settings.email_from_name, "email": settings.email_from_address},
+        "to": [{"email": email.to}],
+        "subject": email.subject,
+        "htmlContent": html,
+        "textContent": email.text,
+    }
+    if settings.email_reply_to:
+        payload["replyTo"] = {"email": settings.email_reply_to}
+    if email.attachments:
+        payload["attachment"] = [
+            {"name": a.filename, "content": base64.b64encode(a.content).decode("ascii")}
+            for a in email.attachments
+        ]
+    return payload
+
+
+def _send_brevo(email: OutgoingEmail) -> None:
+    settings = get_settings()
+    request = urllib.request.Request(
+        BREVO_URL,
+        data=json.dumps(_brevo_payload(email)).encode("utf-8"),
+        method="POST",
+        headers={
+            "api-key": settings.brevo_api_key or "",
+            "accept": "application/json",
+            "content-type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=settings.smtp_timeout_seconds) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"Brevo API returned {error.code}: {detail}") from error
+
+
 def deliver(email: OutgoingEmail) -> None:
     """Send one message synchronously. Failures are logged, never raised to the caller."""
     settings = get_settings()
@@ -81,6 +137,9 @@ def deliver(email: OutgoingEmail) -> None:
             return
         if settings.email_backend == "console":
             logger.info("Email to %s: %s\n%s", email.to, email.subject, email.text)
+            return
+        if settings.email_backend == "brevo":
+            _send_brevo(email)
             return
         message = _build_message(email)
         context = ssl.create_default_context()

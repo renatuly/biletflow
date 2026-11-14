@@ -22,22 +22,16 @@ services:
       # Public URL of the Vercel web app, e.g. https://biletflow-web.vercel.app
       - key: APP_FRONTEND_URL
         sync: false
+      # Render's free tier blocks outbound SMTP ports, so email goes through Brevo's
+      # HTTPS API. EMAIL_FROM_ADDRESS must be a verified sender in Brevo.
       - key: EMAIL_BACKEND
-        value: smtp
+        value: brevo
+      - key: BREVO_API_KEY
+        sync: false
       - key: EMAIL_FROM_ADDRESS
         sync: false
       - key: EMAIL_FROM_NAME
         value: BiletFlow
-      - key: SMTP_HOST
-        sync: false
-      - key: SMTP_PORT
-        value: "587"
-      - key: SMTP_SECURITY
-        value: starttls
-      - key: SMTP_USERNAME
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
 
 databases:
   - name: biletflow-db

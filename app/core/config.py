@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     app_email_verification_hours: int = 24
     app_password_reset_minutes: int = 30
 
-    # "console" logs messages, "memory" keeps them in-process for tests, "smtp" delivers them.
-    email_backend: Literal["console", "memory", "smtp"] = "console"
+    # "console" logs messages, "memory" keeps them in-process for tests, "smtp" delivers them,
+    # "brevo" delivers them over HTTPS (for hosts that block SMTP ports, e.g. Render free tier).
+    email_backend: Literal["console", "memory", "smtp", "brevo"] = "console"
     email_from_address: str = "no-reply@biletflow.kz"
     email_from_name: str = "BiletFlow"
     email_reply_to: str | None = None
@@ -33,6 +34,7 @@ class Settings(BaseSettings):
     # "starttls" for port 587, "ssl" for port 465, "none" only for local relays such as Mailpit.
     smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
     smtp_timeout_seconds: int = 20
+    brevo_api_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -54,8 +56,10 @@ class Settings(BaseSettings):
         if self.app_env == "production":
             if len(self.app_secret_key) < 32 or self.app_secret_key.startswith("development"):
                 raise ValueError("APP_SECRET_KEY must be a unique value of 32+ characters")
-            if self.email_backend != "smtp":
-                raise ValueError("EMAIL_BACKEND must be smtp in production")
+            if self.email_backend not in ("smtp", "brevo"):
+                raise ValueError("EMAIL_BACKEND must be smtp or brevo in production")
+            if self.email_backend == "brevo" and not self.brevo_api_key:
+                raise ValueError("BREVO_API_KEY is required when EMAIL_BACKEND=brevo")
         return self
 
     @property
@@ -65,7 +69,7 @@ class Settings(BaseSettings):
     @property
     def exposes_demo_tokens(self) -> bool:
         """Expose one-time tokens in response headers only when no real email is sent."""
-        return self.app_env != "production" and self.email_backend != "smtp"
+        return self.app_env != "production" and self.email_backend not in ("smtp", "brevo")
 
 
 @lru_cache
