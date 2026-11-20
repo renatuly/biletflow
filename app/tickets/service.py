@@ -1,21 +1,34 @@
 """Business rules for the tickets domain."""
 
 import io
-from datetime import datetime
+from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path
+from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import qrcode
 from qrcode.constants import ERROR_CORRECT_M
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+)
 
 from app.events.models import Event, Venue
 from app.tickets.models import Ticket, TicketType
 
 
 def local_time(value: datetime, time_zone: str) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
     try:
         return value.astimezone(ZoneInfo(time_zone))
     except ZoneInfoNotFoundError:
@@ -39,48 +52,93 @@ def admission_qr_png(credential: str) -> bytes:
     return stream.getvalue()
 
 
+@lru_cache(maxsize=1)
+def ticket_fonts():
+    directory = Path(__file__).resolve().parents[1] / "assets/fonts/noto_sans"
+    for name, filename in [
+        ("BiletFlowSans", "NotoSans-Regular.ttf"),
+        ("BiletFlowSans-Bold", "NotoSans-Bold.ttf"),
+    ]:
+        pdfmetrics.registerFont(TTFont(name, str(directory / filename)))
+    pdfmetrics.registerFontFamily(
+        "BiletFlowSans", normal="BiletFlowSans", bold="BiletFlowSans-Bold"
+    )
+
+
 def render_ticket_pdf(ticket: Ticket, event: Event, venue: Venue, ticket_type: TicketType) -> bytes:
-    """Print-optimized A4 ticket built from the canonical ticket record."""
+    """Unicode A4 admission ticket with flowing text and an indivisible QR block."""
+    ticket_fonts()
     output = io.BytesIO()
-    page = canvas.Canvas(output, pagesize=A4)
-    width, height = A4
     margin = 20 * mm
-    page.setTitle(f"BiletFlow Ticket {ticket.id}")
-    page.setFont("Helvetica-Bold", 10)
-    page.drawString(margin, height - margin, "BILETFLOW · ADMISSION TICKET")
-    page.setFont("Helvetica-Bold", 20)
-    page.drawString(margin, height - margin - 30, event.title[:60])
-    page.setFont("Helvetica", 12)
-    lines = [
+    document = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin + 10 * mm,
+        title=f"BiletFlow Ticket {ticket.id}",
+    )
+    body = ParagraphStyle(
+        "TicketBody",
+        fontName="BiletFlowSans",
+        fontSize=11,
+        leading=16,
+        spaceAfter=8,
+        splitLongWords=True,
+    )
+    heading = ParagraphStyle(
+        "TicketTitle",
+        parent=body,
+        fontName="BiletFlowSans-Bold",
+        fontSize=19,
+        leading=25,
+        spaceAfter=16,
+    )
+
+    def paragraph(text, style=body):
+        # User strings are text, never ReportLab markup or remote image URLs.
+        return Paragraph(escape(str(text)).replace("\r", "").replace("\n", "<br/>"), style)
+
+    story = [paragraph("BILETFLOW · ADMISSION TICKET"), paragraph(event.title, heading)]
+    fields = [
         f"Date: {format_event_time(event)}",
         f"Venue: {venue.name}, {venue.address}, {venue.city}",
         f"Ticket type: {ticket_type.name}",
         f"Attendee: {ticket.attendee_name}",
     ]
     if ticket.seat:
-        lines.append(
+        fields.append(
             f"Seat: Section {ticket.section or '-'} · Row {ticket.row or '-'} · Seat {ticket.seat}"
         )
-    lines.append(f"Ticket ID: {ticket.id}")
-    for index, line in enumerate(lines):
-        page.drawString(margin, height - margin - 62 - index * 20, line)
+    story.extend(paragraph(line) for line in fields)
     qr_size = 85 * mm
-    qr_top = height - margin - 62 - len(lines) * 20 - 20
-    page.drawImage(
-        ImageReader(io.BytesIO(admission_qr_png(ticket.qr_credential))),
-        margin,
-        qr_top - qr_size,
-        width=qr_size,
-        height=qr_size,
+    story.append(
+        KeepTogether(
+            [
+                Spacer(1, 4 * mm),
+                paragraph(f"Ticket ID: {ticket.id}"),
+                Image(
+                    io.BytesIO(admission_qr_png(ticket.qr_credential)),
+                    width=qr_size,
+                    height=qr_size,
+                    hAlign="LEFT",
+                ),
+                Spacer(1, 4 * mm),
+                paragraph(
+                    "Present this QR code at the entrance. "
+                    "Digital and printed copies admit only once."
+                ),
+            ]
+        )
     )
-    page.setFont("Helvetica", 9)
-    page.drawString(
-        margin,
-        qr_top - qr_size - 16,
-        "Present this QR code at the entrance. Digital and printed copies admit only once.",
-    )
-    page.drawString(margin, margin, f"Status at issue: {ticket.status}")
-    page.drawRightString(width - margin, margin, "biletflow.kz")
-    page.showPage()
-    page.save()
+
+    def footer(page, doc):
+        page.saveState()
+        page.setFont("BiletFlowSans", 9)
+        page.drawString(margin, margin, f"Status at issue: {ticket.status}")
+        page.drawRightString(A4[0] - margin, margin, f"biletflow.kz · {doc.page}")
+        page.restoreState()
+
+    document.build(story, onFirstPage=footer, onLaterPages=footer)
     return output.getvalue()
