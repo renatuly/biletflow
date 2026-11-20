@@ -84,6 +84,21 @@ def activity(
     return result
 
 
+def allocate_minor(total, weights):
+    """Allocate integer minor units exactly, with a stable largest-remainder tie break."""
+    result = dict.fromkeys(weights, 0)
+    denominator = sum(weights.values())
+    if not total or not denominator:
+        return result
+    fractions = {}
+    for key, weight in weights.items():
+        result[key], fractions[key] = divmod(total * weight, denominator)
+    remainder = total - sum(result.values())
+    for key in sorted(weights, key=lambda key: (-fractions[key], str(key)))[:remainder]:
+        result[key] += 1
+    return result
+
+
 @router.get("/events/{event_id}/analytics")
 def analytics(
     event_id: UUID,
@@ -164,16 +179,21 @@ def analytics(
         if not oi:
             continue
         subtotal = sum(i.unit_price_minor * i.quantity for i in oi)
-        discount = (
-            o.discount_minor
-            if not ticket_type_id
-            else round(o.discount_minor * subtotal / max(1, o.subtotal_minor))
-        )
-        # Allocate order discounts, fees and refunds for the ticket-type filter.
         all_items = [i for i in items if i.order_id == o.id]
-        weight = sum(i.quantity for i in oi) / max(1, sum(i.quantity for i in all_items))
-        fee = round(o.processing_fee_minor * weight)
-        refund = round(refund_by_order[o.id] * weight)
+        # Recorded item discounts preserve ticket-type campaign restrictions.
+        discounted = {
+            i.id: max(0, i.unit_price_minor * i.quantity - i.discount_minor) for i in all_items
+        }
+        fee_weights = (
+            discounted if sum(discounted.values()) else {i.id: i.quantity for i in all_items}
+        )
+        item_fees = allocate_minor(o.processing_fee_minor, fee_weights)
+        # Refunds follow each item's paid contribution, including its fee share.
+        paid = {i.id: discounted[i.id] + item_fees[i.id] for i in all_items}
+        item_refunds = allocate_minor(refund_by_order[o.id], paid)
+        discount = sum(i.discount_minor for i in oi) if ticket_type_id else o.discount_minor
+        fee = sum(item_fees[i.id] for i in oi) if ticket_type_id else o.processing_fee_minor
+        refund = sum(item_refunds[i.id] for i in oi) if ticket_type_id else refund_by_order[o.id]
         total = subtotal - discount + fee
         gross += subtotal
         discounts += discount
