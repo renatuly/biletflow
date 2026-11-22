@@ -4,6 +4,7 @@ from app.campaigns.router import router as campaigns_router
 from app.events.paid_applications import router as paid_applications_router
 from app.events.router import router as events_router
 from app.health.router import router as health_router
+from app.notifications.diagnostics import router as email_diagnostics_router
 from app.orders.router import router as orders_router
 from app.platform.management import router as management_router
 from app.platform.operations_api import router as operations_router
@@ -30,3 +31,4 @@ api_router.include_router(management_router)
 
 
 api_router.include_router(operations_router)
+api_router.include_router(email_diagnostics_router)

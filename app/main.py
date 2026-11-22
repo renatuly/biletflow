@@ -38,7 +38,16 @@ def create_app() -> FastAPI:
     app_logger.setLevel(logging.INFO)
     if not app_logger.handlers:
         app_logger.addHandler(logging.StreamHandler())
+    if settings.email_backend in ("smtp", "brevo"):
+        from app.core.email import config_problems
+
+        # Delivery runs in the background and only logs failures; surface bad config early.
+        for problem in config_problems():
+            logging.getLogger("biletflow.email").error("Email configuration: %s", problem)
     create_schema()
+    from app.demo_accounts import provision_on_startup
+
+    provision_on_startup()
     application = FastAPI(
         title=settings.app_name,
         debug=settings.app_debug,

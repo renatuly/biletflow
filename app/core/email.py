@@ -108,7 +108,36 @@ def _brevo_payload(email: OutgoingEmail) -> dict:
     return payload
 
 
-def _send_brevo(email: OutgoingEmail) -> None:
+USER_AGENT = "BiletFlow-API/0.1 (+https://github.com/biletflow)"
+DEFAULT_SENDER = "no-reply@biletflow.kz"
+
+
+def _brevo_hint(status: int, detail: str) -> str:
+    """Translate Brevo's common rejections into the setting that has to change."""
+    text = detail.lower()
+    if status == 401 and "ip" in text:
+        return (
+            " Hint: Brevo blocks API calls from unrecognised IP addresses. Render's outbound "
+            "IPs change, so disable 'Authorised IPs' (Brevo > Security > Authorised IPs) "
+            "or add every Render outbound IP."
+        )
+    if status == 401:
+        return (
+            " Hint: BREVO_API_KEY must be a v3 API key (starts with 'xkeysib-'), not an SMTP "
+            "key ('xsmtpsib-'). Create one under Brevo > SMTP & API > API Keys."
+        )
+    if status == 400 and "sender" in text:
+        return (
+            " Hint: EMAIL_FROM_ADDRESS must be a verified sender (Brevo > Senders, "
+            "Domains & Dedicated IPs)."
+        )
+    if status == 403 and ("not activated" in text or "permission" in text):
+        return " Hint: the Brevo account's transactional email service is not activated yet."
+    return ""
+
+
+def _send_brevo(email: OutgoingEmail) -> str:
+    """Send through Brevo and return its messageId; raises with a diagnostic on failure."""
     settings = get_settings()
     request = urllib.request.Request(
         BREVO_URL,
@@ -118,48 +147,100 @@ def _send_brevo(email: OutgoingEmail) -> None:
             "api-key": settings.brevo_api_key or "",
             "accept": "application/json",
             "content-type": "application/json",
+            # Python's default "Python-urllib" agent can be rejected by Brevo's edge.
+            "user-agent": USER_AGENT,
         },
     )
     try:
         with urllib.request.urlopen(request, timeout=settings.smtp_timeout_seconds) as response:
-            response.read()
+            body = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"Brevo API returned {error.code}: {detail}") from error
+        raise RuntimeError(
+            f"Brevo API returned {error.code}: {detail}.{_brevo_hint(error.code, detail)}"
+        ) from error
+    try:
+        message_id = json.loads(body or b"{}").get("messageId") or ""
+    except (ValueError, AttributeError):
+        message_id = ""
+    if not message_id:
+        raise RuntimeError(f"Brevo API accepted the request without a messageId: {body[:200]!r}")
+    return str(message_id)
+
+
+def config_problems() -> list[str]:
+    """Misconfigurations that make delivery fail; no secret values are included."""
+    settings = get_settings()
+    problems = []
+    sender = (settings.email_from_address or "").strip()
+    if settings.email_backend in ("console", "memory"):
+        problems.append(
+            f"EMAIL_BACKEND={settings.email_backend}: messages are not delivered to inboxes."
+        )
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", sender):
+        problems.append("EMAIL_FROM_ADDRESS is empty or not an email address.")
+    elif settings.email_backend == "brevo" and sender == DEFAULT_SENDER:
+        problems.append(
+            f"EMAIL_FROM_ADDRESS is the default {DEFAULT_SENDER}; set it to a sender "
+            "verified in Brevo."
+        )
+    if settings.email_backend == "brevo":
+        key = (settings.brevo_api_key or "").strip()
+        if not key:
+            problems.append("BREVO_API_KEY is not set.")
+        elif key.startswith("xsmtpsib-"):
+            problems.append(
+                "BREVO_API_KEY is an SMTP key (xsmtpsib-); the HTTPS API needs a v3 API key "
+                "(xkeysib-)."
+            )
+        elif not key.startswith("xkeysib-"):
+            problems.append("BREVO_API_KEY does not look like a Brevo v3 API key (xkeysib-...).")
+        elif key != (settings.brevo_api_key or ""):
+            problems.append("BREVO_API_KEY has leading or trailing whitespace.")
+    if settings.email_backend == "smtp" and not settings.smtp_host:
+        problems.append("SMTP_HOST is not set.")
+    return problems
+
+
+def send(email: OutgoingEmail) -> str:
+    """Send one message synchronously and raise on failure. Returns a delivery reference."""
+    settings = get_settings()
+    if settings.email_backend == "memory":
+        outbox.append(email)
+        return "memory"
+    if settings.email_backend == "console":
+        logger.info("Email to %s: %s\n%s", email.to, email.subject, email.text)
+        return "console"
+    if settings.email_backend == "brevo":
+        return _send_brevo(email)
+    message = _build_message(email)
+    context = ssl.create_default_context()
+    if settings.smtp_security == "ssl":
+        server = smtplib.SMTP_SSL(
+            settings.smtp_host,
+            settings.smtp_port,
+            timeout=settings.smtp_timeout_seconds,
+            context=context,
+        )
+    else:
+        server = smtplib.SMTP(
+            settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds
+        )
+    with server:
+        if settings.smtp_security == "starttls":
+            server.starttls(context=context)
+        if settings.smtp_username:
+            server.login(settings.smtp_username, settings.smtp_password or "")
+        server.send_message(message)
+    return "smtp"
 
 
 def deliver(email: OutgoingEmail) -> None:
     """Send one message synchronously. Failures are logged, never raised to the caller."""
-    settings = get_settings()
     try:
-        if settings.email_backend == "memory":
-            outbox.append(email)
-            return
-        if settings.email_backend == "console":
-            logger.info("Email to %s: %s\n%s", email.to, email.subject, email.text)
-            return
-        if settings.email_backend == "brevo":
-            _send_brevo(email)
-            return
-        message = _build_message(email)
-        context = ssl.create_default_context()
-        if settings.smtp_security == "ssl":
-            server = smtplib.SMTP_SSL(
-                settings.smtp_host,
-                settings.smtp_port,
-                timeout=settings.smtp_timeout_seconds,
-                context=context,
-            )
-        else:
-            server = smtplib.SMTP(
-                settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds
-            )
-        with server:
-            if settings.smtp_security == "starttls":
-                server.starttls(context=context)
-            if settings.smtp_username:
-                server.login(settings.smtp_username, settings.smtp_password or "")
-            server.send_message(message)
+        reference = send(email)
+        if reference not in ("memory", "console"):
+            logger.info("Email to %s accepted (%s): %s", email.to, reference, email.subject)
     except Exception:
         logger.exception("Email delivery to %s failed: %s", email.to, email.subject)
 

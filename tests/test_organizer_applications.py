@@ -142,3 +142,36 @@ def test_inactive_applicant_cannot_be_approved(setup):
         headers=headers["admin"],
     )
     assert response.status_code == 409
+
+
+def test_rejected_application_notifies_and_can_be_resubmitted(setup):
+    client, headers, engine = setup
+    root = "/api/v1"
+    created = client.post(
+        root + "/organizer-applications", headers=headers["other"], json=DETAILS
+    ).json()
+    listed = client.get(root + "/admin/organizer-applications", headers=headers["admin"]).json()
+    assert [(item["id"], item["email"]) for item in listed] == [
+        (created["id"], "other@example.com")
+    ]
+    reject = root + f"/admin/organizer-applications/{created['id']}/reject"
+    assert client.post(reject, headers=headers["other"], json={"reason": "No"}).status_code == 403
+    assert client.post(reject, headers=headers["admin"], json={"reason": " "}).status_code == 422
+    result = client.post(reject, headers=headers["admin"], json={"reason": "Missing details"})
+    assert result.status_code == 200, result.text
+    assert result.json()["status"] == "rejected"
+    assert client.get(root + "/admin/organizer-applications", headers=headers["admin"]).json() == []
+    with Session(engine) as db:
+        notice = db.scalar(
+            select(Notification).where(Notification.kind == "organizer_application_rejected")
+        )
+        assert notice.message == "Missing details"
+    again = client.post(
+        root + "/organizer-applications",
+        headers=headers["other"],
+        json={**DETAILS, "organization_name": "Better Events"},
+    )
+    assert again.status_code == 201, again.text
+    assert again.json()["id"] == created["id"]
+    assert again.json()["status"] == "pending"
+    assert again.json()["organization_name"] == "Better Events"

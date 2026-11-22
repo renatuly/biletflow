@@ -16,8 +16,34 @@ services:
       SMTP_SECURITY: ${SMTP_SECURITY:-none}
     ports:
       - "8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     depends_on:
       db:
+        condition: service_healthy
+
+  # Next.js web app: http://localhost:3000. Expects ../biletflow_web next to this repo.
+  web:
+    build:
+      context: ../biletflow_web
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api/v1
+    environment:
+      # Server-side gateway target inside the compose network.
+      API_BASE_URL: http://api:8000/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
         condition: service_healthy
 
   db:

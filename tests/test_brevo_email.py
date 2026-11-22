@@ -67,3 +67,44 @@ def test_production_requires_brevo_key():
             brevo_api_key=None,
             _env_file=None,
         )
+
+
+def test_brevo_errors_include_actionable_hints(brevo_settings, caplog):
+    import io
+    import urllib.error
+
+    error = urllib.error.HTTPError(
+        email_module.BREVO_URL,
+        401,
+        "Unauthorized",
+        {},
+        io.BytesIO(b'{"message":"We have detected you are using an unrecognised IP address"}'),
+    )
+    with patch.object(email_module.urllib.request, "urlopen", side_effect=error):
+        deliver(OutgoingEmail(to="a@example.com", subject="S", text="t", html="<p>t</p>"))
+    assert "Authorised IPs" in caplog.text
+
+
+def test_config_problems_flag_smtp_key_and_default_sender(monkeypatch):
+    monkeypatch.setenv("EMAIL_BACKEND", "brevo")
+    monkeypatch.setenv("BREVO_API_KEY", "xsmtpsib-abc")
+    monkeypatch.setenv("EMAIL_FROM_ADDRESS", "no-reply@biletflow.kz")
+    get_settings.cache_clear()
+    try:
+        problems = " ".join(email_module.config_problems())
+    finally:
+        get_settings.cache_clear()
+    assert "SMTP key" in problems and "verified in Brevo" in problems
+    assert "xsmtpsib-abc" not in problems
+
+
+def test_admin_email_test_reports_provider_failure(client, engine):
+    from factories import API, account
+
+    admin = account(client, engine, "root@example.com", role="platform_admin")
+    user = account(client, engine, "user@example.com")
+    assert client.post(f"{API}/admin/email/test", headers=user, json={}).status_code == 403
+    with patch.object(email_module, "send", side_effect=RuntimeError("Brevo API returned 401")):
+        result = client.post(f"{API}/admin/email/test", headers=admin, json={}).json()
+    assert result["delivered"] is False and "401" in result["detail"]
+    assert result["to"] == "root@example.com"

@@ -511,22 +511,71 @@ def activate_paid_sales(
     return submit(db, event_id, user)
 
 
+CHECK_IN_PERMISSIONS = ("check_in", "reverse_check_in", "manage_attendees")
+
+
+def staff_json(assignment, member):
+    return {
+        "id": str(assignment.id),
+        "user_id": str(member.id),
+        "email": member.email,
+        "name": member.full_name or member.email,
+        "permissions": list(assignment.permissions),
+    }
+
+
+def require_event_owner(db, event_id, user):
+    event = require_event_manager(db, event_id, user)
+    if event.organizer_id != user.id and UserRole.PLATFORM_ADMIN not in user.roles:
+        raise HTTPException(403, detail="Only the organizer can manage event staff")
+    return event
+
+
+@router.get("/events/{event_id}/staff")
+def list_staff(event_id: UUID, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Check-in staff of the event (support-only members are listed under /support)."""
+    event = require_event_owner(db, event_id, user)
+    result = []
+    for assignment in db.scalars(
+        select(StaffAssignment)
+        .where(StaffAssignment.event_id == event.id)
+        .order_by(StaffAssignment.created_at)
+    ):
+        member = db.get(User, assignment.user_id)
+        if member and any(p in CHECK_IN_PERMISSIONS for p in assignment.permissions):
+            result.append(staff_json(assignment, member))
+    return result
+
+
 @router.post("/events/{event_id}/staff", status_code=201)
 def assign_staff(
     event_id: UUID, email: str, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    event = require_event_manager(db, event_id, user)
-    staff = db.scalar(select(User).where(User.email == email.lower()))
+    event = require_event_owner(db, event_id, user)
+    if event.status in ("cancelled", "completed", "suspended"):
+        raise HTTPException(409, detail="Staff cannot be assigned to a closed event")
+    staff = db.scalar(select(User).where(User.email == email.strip().lower()))
     if not staff:
-        raise HTTPException(404, detail="User not found")
+        raise HTTPException(
+            404, detail="No BiletFlow account uses this email. Ask them to register first."
+        )
+    if not staff.is_active:
+        raise HTTPException(409, detail="This account is suspended")
     if UserRole.EVENT_ADMIN not in staff.roles:
         staff.roles = [*staff.roles, UserRole.EVENT_ADMIN]
-    assignment = StaffAssignment(
-        event_id=event.id,
-        user_id=staff.id,
-        permissions=["check_in", "reverse_check_in", "manage_attendees"],
+    # One row per event and user: support and check-in permissions share it.
+    assignment = db.scalar(
+        select(StaffAssignment).where(
+            StaffAssignment.event_id == event.id, StaffAssignment.user_id == staff.id
+        )
     )
-    db.add(assignment)
+    if assignment is None:
+        assignment = StaffAssignment(
+            event_id=event.id, user_id=staff.id, permissions=list(CHECK_IN_PERMISSIONS)
+        )
+        db.add(assignment)
+    else:
+        assignment.permissions = sorted(set(assignment.permissions) | set(CHECK_IN_PERMISSIONS))
     db.flush()
     audit(
         db,
@@ -537,12 +586,46 @@ def assign_staff(
         assignment.id,
         f"Assigned {staff.email}",
     )
+    db.add(
+        Notification(
+            user_id=staff.id,
+            kind="staff_assignment",
+            title=event.title,
+            message="You were assigned as check-in staff for this event.",
+            data={"event_id": str(event.id)},
+        )
+    )
     db.commit()
-    return {
-        "id": str(assignment.id),
-        "user_id": str(staff.id),
-        "permissions": assignment.permissions,
-    }
+    return staff_json(assignment, staff)
+
+
+@router.delete("/events/{event_id}/staff/{member_id}")
+def remove_staff(
+    event_id: UUID,
+    member_id: UUID,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    event = require_event_owner(db, event_id, user)
+    removed = False
+    for assignment in db.scalars(
+        select(StaffAssignment).where(
+            StaffAssignment.event_id == event.id, StaffAssignment.user_id == member_id
+        )
+    ):
+        remaining = [p for p in assignment.permissions if p not in CHECK_IN_PERMISSIONS]
+        removed = removed or remaining != list(assignment.permissions)
+        if remaining:
+            assignment.permissions = remaining
+        else:
+            db.delete(assignment)
+    if not removed:
+        raise HTTPException(404, detail="This person is not check-in staff for the event")
+    audit(
+        db, user, event, "staff.removed", "staff_assignment", member_id, "Removed check-in access"
+    )
+    db.commit()
+    return {"status": "removed"}
 
 
 @router.get("/events/{event_id}/history")

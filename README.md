@@ -31,11 +31,30 @@ python -m app.dev_seed
 All demo accounts use `DemoPass123!`; their email addresses are printed by the
 command. The seed refuses to run when `APP_ENV=production`.
 
-For PostgreSQL-based demonstration deployment:
+For the deployed site, `app.demo_accounts` creates only the four login accounts
+(`admin.demo`, `organizer.demo`, `attendee.demo`, `staff.demo` at `example.com`) and
+works in production. The password comes from `DEMO_ACCOUNTS_PASSWORD` (12+ characters
+in production):
+
+```bash
+DEMO_ACCOUNTS_PASSWORD='...' python -m app.demo_accounts [--reset-passwords]
+```
+
+On Render (no shell on the free tier), set `DEMO_ACCOUNTS_PASSWORD` on the service
+instead: the API creates any missing demo accounts at startup and never overwrites
+existing passwords. Assign `staff.demo` to an event from the organizer's event page
+(Event staff) so it can check in tickets in the mobile app.
+
+For PostgreSQL-based demonstration deployment of the API and the web app (the
+`biletflow_web` repository must be checked out next to this one):
 
 ```bash
 docker compose up --build
 ```
+
+The web app is served at `http://localhost:3000` and the API at `http://localhost:8000`.
+Docker Compose also reads `.env` for `${...}` substitution, so an `EMAIL_BACKEND` set there
+overrides the Mailpit default.
 
 Compose also starts [Mailpit](https://mailpit.axllent.org/); every email the API sends
 (verification, password reset, ticket confirmations with PDF tickets, refunds,
@@ -53,6 +72,19 @@ cancellations) appears at `http://localhost:8025`.
 Links in emails point to `APP_FRONTEND_URL`. Email is sent after the response with
 FastAPI background tasks, so a slow or failing SMTP server never blocks checkout;
 delivery errors are logged.
+
+### Diagnosing missing emails
+
+Delivery runs in the background and only logs failures, so a misconfigured provider
+fails silently for users. To find the cause:
+
+- At startup the API logs `Email configuration: ...` errors for a missing or SMTP-type
+  Brevo key (the HTTPS API needs a v3 `xkeysib-` key) and an unset/default sender.
+- Every failed send logs Brevo's response with a hint (e.g. *Authorised IPs* blocking
+  Render's changing outbound IPs, an unverified sender, or a wrong key type).
+- Platform admins can open **Admin > Overview > Email delivery** on the web app (or call
+  `POST /api/v1/admin/email/test`) to send a test email synchronously and see the
+  provider's real answer. From a shell: `python -m app.notifications.diagnostics you@example.com`.
 
 ## Schema changes
 
