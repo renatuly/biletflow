@@ -753,19 +753,22 @@ def build():
             )
         db.commit()
 
-    # Formal moderation histories are separate from support conversations.
+    # Formal review records and their linked attendee conversations.
     for slug, status in (
         ("suspended", "open"),
         ("food", "under_review"),
         ("comedy", "resolved"),
         ("run", "dismissed"),
     ):
-        report = call(
-            "POST",
-            f"/events/{events[slug]}/reports",
-            "attendee",
-            json={"reason": "Please verify the published venue and accessibility information."},
-        )
+        existing_reports = call("GET", "/reports/mine", "attendee")
+        report = next((r for r in existing_reports if r["event_id"] == events[slug]), None)
+        if report is None:
+            report = call(
+                "POST",
+                f"/events/{events[slug]}/reports",
+                "attendee",
+                json={"reason": "Please verify the published venue and accessibility information."},
+            )
         if status != "open":
             call(
                 "PATCH",

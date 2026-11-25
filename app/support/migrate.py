@@ -7,6 +7,8 @@ def upgrade(engine):
     inspector = inspect(engine)
     if "support_cases" not in inspector.get_table_names():
         return
+    from app.support.models import SupportCase, SupportMessage
+
     columns = {c["name"] for c in inspector.get_columns("support_cases")}
     first_upgrade = "flow" not in columns
     with engine.begin() as connection:
@@ -17,13 +19,23 @@ def upgrade(engine):
         }.items():
             if name not in columns:
                 connection.execute(text(f"ALTER TABLE support_cases ADD COLUMN {name} {ddl}"))
+        for name, table in (
+            ("event_report_id", "event_reports"),
+            ("order_dispute_id", "order_disputes"),
+        ):
+            if name not in columns:
+                column_type = SupportCase.__table__.c[name].type.compile(dialect=engine.dialect)
+                connection.execute(
+                    text(
+                        f"ALTER TABLE support_cases ADD COLUMN {name} {column_type} "
+                        f"REFERENCES {table} (id)"
+                    )
+                )
         message_columns = {c["name"] for c in inspect(connection).get_columns("support_messages")}
         if "client_key" not in message_columns:
             connection.execute(
                 text("ALTER TABLE support_messages ADD COLUMN client_key VARCHAR(128)")
             )
-    from app.support.models import SupportCase, SupportMessage
-
     for table in [SupportCase.__table__, SupportMessage.__table__]:
         for index in table.indexes:
             index.create(engine, checkfirst=True)
@@ -48,6 +60,15 @@ def upgrade(engine):
                     if case.category not in {"account", "payment", "activation", "technical"}:
                         case.category = "technical"
             db.commit()
+
+    # Bring existing formal histories into chat without deleting or rewriting them.
+    from sqlalchemy.orm import Session
+
+    from app.support.formal_cases import backfill_conversations
+
+    with Session(engine) as db:
+        backfill_conversations(db)
+        db.commit()
 
 
 if __name__ == "__main__":

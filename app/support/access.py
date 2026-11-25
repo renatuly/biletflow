@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.events.models import Event, StaffAssignment
+from app.platform.operations_models import EventReport, OrderDispute
 from app.support.models import SupportCase, SupportChange
 from app.users.models import Notification, User
 
@@ -27,27 +28,51 @@ def handles_event(db: Session, event: Event, user: User):
 def can_manage(db: Session, case: SupportCase, user: User):
     if admin(user):
         return True
-    if case.flow != "attendee" or not case.event_id or case.category == "report_event":
+    if case.flow != "attendee" or not case.event_id or case.category in {"report_event", "payment"}:
         return False
     event = db.get(Event, case.event_id)
     return bool(event and handles_event(db, event, user))
 
 
-def visible_case(db, case_id, user, lock=False):
-    query = select(SupportCase).where(SupportCase.id == case_id)
+def linked_record(db, case, lock=False):
+    model, record_id = (
+        (EventReport, case.event_report_id)
+        if case.event_report_id
+        else (OrderDispute, case.order_dispute_id)
+    )
+    if not record_id:
+        return None
+    query = select(model).where(model.id == record_id)
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
-    case = db.scalar(query)
+    return db.scalar(query)
+
+
+def visible_case(db, case_id, user, lock=False):
+    case = db.get(SupportCase, case_id)
     if not case:
         raise HTTPException(404, detail="Support case not found")
     if case.requester_id != user.id and not can_manage(db, case, user):
         raise HTTPException(403, detail="Not authorized for this support queue")
+    if lock:
+        # Formal decisions and chat writes acquire the formal row before the conversation.
+        linked_record(db, case, lock=True)
+        case = db.scalar(
+            select(SupportCase)
+            .where(SupportCase.id == case_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     return case
 
 
 def candidates(db: Session, case: SupportCase):
     users = list(db.scalars(select(User).where(User.is_active.is_(True))))
-    if case.flow == "organizer_platform" or not case.event_id or case.category == "report_event":
+    if (
+        case.flow == "organizer_platform"
+        or not case.event_id
+        or case.category in {"report_event", "payment"}
+    ):
         return [u for u in users if admin(u)]
     event = db.get(Event, case.event_id)
     return [u for u in users if event and handles_event(db, event, u)]

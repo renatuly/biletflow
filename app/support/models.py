@@ -10,6 +10,8 @@ class SupportCase(UUIDTimestampMixin, Base):
     __tablename__ = "support_cases"
     __table_args__ = (
         Index("uq_support_case_submission", "requester_id", "client_key", unique=True),
+        Index("uq_support_event_report", "event_report_id", unique=True),
+        Index("uq_support_order_dispute", "order_dispute_id", unique=True),
     )
     requester_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
     flow: Mapped[str] = mapped_column(
@@ -20,6 +22,8 @@ class SupportCase(UUIDTimestampMixin, Base):
     event_id: Mapped[UUID | None] = mapped_column(ForeignKey("events.id"), index=True)
     order_id: Mapped[UUID | None] = mapped_column(ForeignKey("orders.id"))
     ticket_id: Mapped[UUID | None] = mapped_column(ForeignKey("tickets.id"))
+    event_report_id: Mapped[UUID | None] = mapped_column(ForeignKey("event_reports.id"))
+    order_dispute_id: Mapped[UUID | None] = mapped_column(ForeignKey("order_disputes.id"))
     assigned_to: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     category: Mapped[str] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(30), default="open")

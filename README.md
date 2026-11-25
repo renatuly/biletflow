@@ -182,12 +182,27 @@ controls. All changes are scoped and audited. Run `pytest` for role, lifecycle,
 expiration, access, settings, notification and payout integration coverage.
 
 
-### Event reports through support
+### Unified attendee support
 
-The mobile attendee event details action creates an ordinary support case with
-`flow=attendee`, `category=report_event`, and the event ID. These cases route only
-to platform admins even though an event is attached: organizers and event staff
-cannot read, reply, assign, or receive notifications for them. An attendee role
-and accessible event context are required. The mobile app uses Support Chat and
-the admin platform inbox instead of separate report/dispute pages. Existing
-formal report/dispute records and APIs are retained for compatibility.
+Attendees use Support Chat for questions, refunds, event reports and payment
+problems. Event and booking actions open the same conversation with context.
+Event reports and payment problems route privately to platform admins; organizers
+and event staff cannot read, reply to, assign or receive private case messages.
+Ordinary event questions and refunds retain their organizer/support-staff routing.
+
+A new event-report conversation creates a linked EventReport. Payment help on a
+confirmed paid order creates a linked OrderDispute; failed-payment questions use
+an ordinary platform conversation. One active report per attendee/event and one
+active dispute per order remain enforced. Idempotency keys replay the same chat.
+
+Admins retain formal review queues and can also decide a linked review from chat.
+A review decision requires a resolution note and updates the conversation and its
+outcome. Neither resolving a chat nor closing a review issues a refund, transfers
+money or suspends an event. Those controls remain explicit. Organizers receive
+payout-status information without private conversation content or resolution notes.
+
+Startup adds nullable links and unique indexes, then imports existing formal
+histories into Support Chat idempotently. Existing records and messages are
+preserved. Closed reviews are readable and cannot be reopened through chat status
+controls. Legacy formal APIs remain available; submissions through those APIs
+also create the attendee conversation. Restart the API to apply the upgrade.

@@ -20,6 +20,7 @@ from app.support.access import (
     can_manage,
     candidates,
     history,
+    linked_record,
     notify,
     visible_case,
 )
@@ -98,13 +99,14 @@ def case_data(db, case, user):
         if order
         else None
     )
+    record = linked_record(db, case)
     refund_owner = bool(event and (event.organizer_id == user.id or admin(user)))
     return {
         "id": str(case.id),
         "number": "BF-" + case.id.hex[:12].upper(),
         "flow": case.flow,
         "routing": "organizer"
-        if case.flow == "attendee" and event and case.category != "report_event"
+        if case.flow == "attendee" and event and case.category not in {"report_event", "payment"}
         else "platform",
         "requester_id": str(case.requester_id),
         "assigned_to": str(case.assigned_to) if case.assigned_to else None,
@@ -127,6 +129,12 @@ def case_data(db, case, user):
         "ticket_status": ticket.status if ticket else None,
         "refund_policy": event.refund_policy if event else None,
         "can_manage": manager,
+        "can_change_status": manager
+        and (not record or record.status not in {"resolved", "dismissed"}),
+        "formal_id": str(record.id) if record else None,
+        "formal_type": ("report" if case.event_report_id else "dispute") if record else None,
+        "formal_status": record.status if record else None,
+        "formal_resolution": record.resolution if record else None,
         "can_refund": bool(
             case.flow == "attendee"
             and refund_owner
@@ -288,7 +296,7 @@ def create_case(
         # A support agent can handle cases but cannot impersonate an attendee through this role.
         raise HTTPException(403, detail="Use the support inbox to handle attendee cases")
     if data.category == "report_event" and (
-        "attendee" not in user.roles or not data.event_id or data.order_id or data.ticket_id
+        "attendee" not in user.roles or not (data.event_id or data.order_id or data.ticket_id)
     ):
         raise HTTPException(403, detail="Event reports require an attendee and event context")
     if data.category not in (PLATFORM if platform else ATTENDEE):
@@ -306,6 +314,11 @@ def create_case(
         order_id = item.order_id
     order = None
     if order_id:
+        initial = db.get(Order, order_id)
+        if not initial or (not platform and initial.user_id != user.id):
+            raise HTTPException(403, detail="Order does not belong to you")
+        # Match checkout/refund locking order before opening a linked dispute.
+        db.scalar(select(Event).where(Event.id == initial.event_id).with_for_update())
         order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
         if not order or (not platform and order.user_id != user.id):
             raise HTTPException(403, detail="Order does not belong to you")
@@ -323,7 +336,13 @@ def create_case(
         raise HTTPException(
             403, detail="Platform case context must belong to your organizer account"
         )
-    if not platform and event and not order and event.status != "published":
+    if (
+        not platform
+        and event
+        and not order
+        and event.status != "published"
+        and not (data.category == "report_event" and event.status == "suspended")
+    ):
         raise HTTPException(403, detail="An owned order is required for an unpublished event")
     if data.category == "refund" and order is not None:
         if not order or order.status != "confirmed" or order.total_minor <= 0:
@@ -338,16 +357,33 @@ def create_case(
         )
         if duplicate:
             return case_data(db, duplicate, user)
+    formal = None
+    if not platform and data.category == "report_event":
+        from app.platform.formal_service import open_report
+
+        formal = open_report(db, event_id, data.message.strip(), user)
+    elif (
+        not platform
+        and data.category == "payment"
+        and order
+        and order.status == "confirmed"
+        and order.total_minor > 0
+    ):
+        from app.platform.formal_service import open_dispute
+
+        formal = open_dispute(db, order.id, data.message.strip(), user)
     case = SupportCase(
         flow=data.flow,
         requester_id=user.id,
+        event_report_id=formal.id if formal and data.category == "report_event" else None,
+        order_dispute_id=formal.id if formal and data.category == "payment" else None,
         event_id=event_id,
         order_id=order_id,
         ticket_id=data.ticket_id,
         category=data.category,
         subject=data.subject.strip(),
         assigned_to=event.organizer_id
-        if event and not platform and data.category != "report_event"
+        if event and not platform and data.category not in {"report_event", "payment"}
         else None,
         client_key=key,
         request_fingerprint=fingerprint,
@@ -540,6 +576,17 @@ def change_status(
     order = db.get(Order, case.order_id) if case.order_id else None
     if case.category == "refund" and order and order.status == "refunded" and status != "resolved":
         raise HTTPException(409, detail="Completed refund cases remain resolved")
+    record = linked_record(db, case)
+    if record and (record.status in {"resolved", "dismissed"} or status == "resolved"):
+        raise HTTPException(
+            409,
+            detail=(
+                "Use the explicit platform report or dispute decision; "
+                "closed decisions cannot be reopened from chat"
+            ),
+        )
+    if record and status == "in_progress" and record.status == "open":
+        record.status = "under_review"
     if case.status != status:
         history(db, case, user, "status", case.status, status)
         case.status = status

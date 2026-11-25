@@ -16,6 +16,7 @@ from app.events.models import Event
 from app.events.schemas import EventRead
 from app.events.service import audit
 from app.orders.models import Order, Refund
+from app.platform.formal_service import open_dispute, open_report
 from app.platform.management import owner
 from app.platform.operations_models import (
     EventInvitation,
@@ -24,7 +25,8 @@ from app.platform.operations_models import (
     PlatformSettings,
     SimulatedPayout,
 )
-from app.platform.operations_service import require_access, settings, utc
+from app.platform.operations_service import settings, utc
+from app.support.formal_cases import ensure_conversation, sync_decision
 from app.users.models import Notification, User, UserRole
 
 router = APIRouter(tags=["invitations", "operations"])
@@ -305,31 +307,9 @@ def report_json(db, row):
 def report_event(
     event_id: UUID, data: Reason, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    require_text(data.reason)
-    event = db.scalar(select(Event).where(Event.id == event_id).with_for_update())
-    require_access(db, event, user)
-    if event.status not in ("published", "suspended") or event.organizer_id == user.id:
-        raise HTTPException(409, detail="This event cannot be reported by this account")
-    if db.scalar(
-        select(EventReport.id).where(
-            EventReport.event_id == event.id,
-            EventReport.reporter_id == user.id,
-            EventReport.status.in_(["open", "under_review"]),
-        )
-    ):
-        raise HTTPException(409, detail="You already have an active report for this event")
-    row = EventReport(event_id=event.id, reporter_id=user.id, reason=data.reason.strip())
-    db.add(row)
-    db.flush()
-    audit(
-        db,
-        user,
-        event,
-        "report.created",
-        "report",
-        row.id,
-        "Event report submitted for administrator review",
-    )
+    row = open_report(db, event_id, data.reason, user)
+    event = db.get(Event, row.event_id)
+    ensure_conversation(db, row)
     for admin in db.scalars(select(User).where(User.is_active.is_(True))):
         if "platform_admin" in admin.roles:
             notify(db, admin.id, event, "event_report", "A new event report needs moderation.")
@@ -377,15 +357,17 @@ def decide_report(
     if data.status == "open":
         raise HTTPException(422, detail="Choose review, resolve or dismiss")
     row.status, row.resolution = data.status, data.resolution.strip()
+    sync_decision(db, row, admin)
     event = db.get(Event, row.event_id)
-    notify(
+    audit(
         db,
-        row.reporter_id,
+        admin,
         event,
-        "report_status",
-        "Report status: " + row.status + ". " + row.resolution,
+        "report." + row.status,
+        "report",
+        row.id,
+        "Platform event-report review updated.",
     )
-    audit(db, admin, event, "report." + row.status, "report", row.id, row.resolution)
     db.commit()
     return report_json(db, row)
 
@@ -412,34 +394,10 @@ def dispute_json(db, row):
 def dispute(
     order_id: UUID, data: Reason, user: User = Depends(current_user), db: Session = Depends(get_db)
 ):
-    require_text(data.reason)
-    initial = db.get(Order, order_id)
-    if not initial or initial.user_id != user.id:
-        raise HTTPException(404, detail="Order not found")
-    db.scalar(select(Event).where(Event.id == initial.event_id).with_for_update())
-    order = db.scalar(select(Order).where(Order.id == order_id).with_for_update())
-    if not order or order.user_id != user.id:
-        raise HTTPException(404, detail="Order not found")
-    if order.status != "confirmed" or order.total_minor <= 0:
-        raise HTTPException(409, detail="Disputes require a confirmed paid order")
-    if db.scalar(
-        select(OrderDispute.id).where(
-            OrderDispute.order_id == order.id, OrderDispute.status.in_(["open", "under_review"])
-        )
-    ):
-        raise HTTPException(409, detail="An active dispute already exists for this order")
-    row = OrderDispute(order_id=order.id, requester_id=user.id, reason=data.reason.strip())
-    db.add(row)
-    db.flush()
+    row = open_dispute(db, order_id, data.reason, user)
+    order = db.get(Order, row.order_id)
     event = db.get(Event, order.event_id)
-    audit(db, user, event, "dispute.created", "dispute", row.id, "Simulated payment dispute opened")
-    notify(
-        db,
-        event.organizer_id,
-        event,
-        "dispute_opened",
-        "A payment dispute is under platform review. Payout is on hold.",
-    )
+    ensure_conversation(db, row)
     for admin in db.scalars(select(User).where(User.is_active.is_(True))):
         if "platform_admin" in admin.roles:
             notify(
@@ -496,16 +454,25 @@ def decide_dispute(
     if row.status in ("resolved", "dismissed") or data.status == "open":
         raise HTTPException(409, detail="Dispute is closed or transition is invalid")
     row.status, row.resolution = data.status, data.resolution.strip()
+    sync_decision(db, row, admin)
     event = db.get(Event, order.event_id)
-    for uid in {row.requester_id, event.organizer_id}:
+    for uid in {event.organizer_id}:
         notify(
             db,
             uid,
             event,
             "dispute_status",
-            "Dispute status: " + row.status + ". " + row.resolution,
+            "Dispute status: " + row.status + ". Review the event payout summary.",
         )
-    audit(db, admin, event, "dispute." + row.status, "dispute", row.id, row.resolution)
+    audit(
+        db,
+        admin,
+        event,
+        "dispute." + row.status,
+        "dispute",
+        row.id,
+        "Platform payment-dispute review updated.",
+    )
     db.commit()
     return dispute_json(db, row)
 
