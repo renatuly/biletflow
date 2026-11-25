@@ -26,7 +26,7 @@ def seed():
     with SessionLocal() as db:
         users = {}
         for role in ("attendee", "organizer", "staff", "admin"):
-            user = db.scalar(select(User).where(User.email == f"{role}.demo@example.com"))
+            user = db.scalar(select(User).where(User.email == f"{role}@example.com"))
             if user is None:
                 raise RuntimeError("Run python -m app.dev_seed first; demo accounts are missing")
             users[role] = user

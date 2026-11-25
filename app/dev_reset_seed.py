@@ -15,23 +15,23 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
-PASSWORD = "DemoPass123!"
+PASSWORD = "demo1234"
 ACCOUNTS = {
-    "attendee": ("attendee.demo@example.com", "Amina Sadykova", ["attendee"]),
-    "organizer": ("organizer.demo@example.com", "Daniyar Nurpeis", ["attendee", "organizer"]),
-    "staff": ("staff.demo@example.com", "Miras Alim", ["attendee", "event_admin"]),
-    "support": ("support.demo@example.com", "Dana Serik", ["attendee", "event_admin"]),
-    "admin": ("admin.demo@example.com", "Aliya Beket", ["attendee", "platform_admin"]),
+    "attendee": ("attendee@example.com", "Amina Sadykova", ["attendee"]),
+    "organizer": ("organizer@example.com", "Daniyar Nurpeis", ["attendee", "organizer"]),
+    "staff": ("staff@example.com", "Miras Alim", ["attendee", "event_admin"]),
+    "support": ("support@example.com", "Dana Serik", ["attendee", "event_admin"]),
+    "admin": ("admin@example.com", "Aliya Beket", ["attendee", "platform_admin"]),
     "city": (
-        "city.organizer.demo@example.com",
+        "city@example.com",
         "Steppe Culture Collective",
         ["attendee", "organizer"],
     ),
-    "new": ("new.attendee.demo@example.com", "Asel Omar", ["attendee"]),
-    "applicant": ("applicant.demo@example.com", "Timur Sarsen", ["attendee"]),
-    "rejected": ("rejected.applicant.demo@example.com", "Samal Tuleu", ["attendee"]),
-    "unverified": ("unverified.demo@example.com", "Nursultan Ilyas", ["attendee"]),
-    "suspended": ("suspended.demo@example.com", "Arman Sapar", ["attendee"]),
+    "new": ("new@example.com", "Asel Omar", ["attendee"]),
+    "applicant": ("applicant@example.com", "Timur Sarsen", ["attendee"]),
+    "rejected": ("rejected@example.com", "Samal Tuleu", ["attendee"]),
+    "unverified": ("unverified@example.com", "Nursultan Ilyas", ["attendee"]),
+    "suspended": ("suspended@example.com", "Arman Sapar", ["attendee"]),
 }
 # slug, title, category, city, days ahead, price (tiyn), capacity, owner
 EVENTS = [
@@ -199,7 +199,7 @@ def build():
         records = dict(ACCOUNTS)
         records.update(
             {
-                f"guest{i}": (f"guest{i:02}.fresh.demo@example.com", name + " Aman", ["attendee"])
+                f"guest{i}": (f"guest{i:02}@example.com", name + " Aman", ["attendee"])
                 for i, name in enumerate(names, 1)
             }
         )

@@ -28,13 +28,13 @@ from app.users.models import User
 
 logger = logging.getLogger("biletflow.demo_accounts")
 
-LOCAL_PASSWORD = "DemoPass123!"
+LOCAL_PASSWORD = "demo1234"
 # (email, full name, roles). Every role keeps "attendee" so the account can also buy tickets.
 DEMO_ACCOUNTS = (
-    ("admin.demo@example.com", "Demo Platform Admin", ["attendee", "platform_admin"]),
-    ("organizer.demo@example.com", "Demo Organizer", ["attendee", "organizer"]),
-    ("attendee.demo@example.com", "Demo Attendee", ["attendee"]),
-    ("staff.demo@example.com", "Demo Event Admin", ["attendee", "event_admin"]),
+    ("admin@example.com", "Demo Platform Admin", ["attendee", "platform_admin"]),
+    ("organizer@example.com", "Demo Organizer", ["attendee", "organizer"]),
+    ("attendee@example.com", "Demo Attendee", ["attendee"]),
+    ("staff@example.com", "Demo Event Admin", ["attendee", "event_admin"]),
 )
 
 
@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         print("Password: the value of DEMO_ACCOUNTS_PASSWORD")
     print(
-        "Event Admin: assign staff.demo@example.com to an event from the organizer's "
+        "Event Admin: assign staff@example.com to an event from the organizer's "
         "event page (Event staff) to enable mobile check-in."
     )
 

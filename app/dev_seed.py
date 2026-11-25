@@ -17,14 +17,14 @@ from app.orders.models import Order, OrderItem, Payment
 from app.tickets.models import CheckInRecord, Ticket, TicketStatus, TicketType
 from app.users.models import User
 
-DEMO_PASSWORD = "DemoPass123!"
+DEMO_PASSWORD = "demo1234"
 DEMO_PROMO_CODE = "BILETFLOW20"
 CORE_USERS = (
-    ("attendee.demo@example.com", "Demo Attendee", ["attendee"]),
-    ("organizer.demo@example.com", "Demo Organizer", ["attendee", "organizer"]),
-    ("staff.demo@example.com", "Demo Check-in Staff", ["attendee", "event_admin"]),
-    ("admin.demo@example.com", "Demo Administrator", ["attendee", "platform_admin"]),
-    ("city.organizer@example.com", "City Events KZ", ["attendee", "organizer"]),
+    ("attendee@example.com", "Demo Attendee", ["attendee"]),
+    ("organizer@example.com", "Demo Organizer", ["attendee", "organizer"]),
+    ("staff@example.com", "Demo Check-in Staff", ["attendee", "event_admin"]),
+    ("admin@example.com", "Demo Administrator", ["attendee", "platform_admin"]),
+    ("city@example.com", "City Events KZ", ["attendee", "organizer"]),
 )
 GUEST_NAMES = (
     "Aruzhan Sarsenova",
@@ -63,7 +63,7 @@ class EventSeed:
     price_minor: int
     capacity: int
     registrations: int
-    organizer_email: str = "organizer.demo@example.com"
+    organizer_email: str = "organizer@example.com"
     status: str = "published"
     demo_ticket: bool = False
 
@@ -95,7 +95,7 @@ EVENTS = (
         900_000,
         300,
         14,
-        organizer_email="city.organizer@example.com",
+        organizer_email="city@example.com",
         demo_ticket=True,
     ),
     EventSeed(
@@ -150,7 +150,7 @@ EVENTS = (
         500_000,
         180,
         9,
-        organizer_email="city.organizer@example.com",
+        organizer_email="city@example.com",
     ),
     EventSeed(
         "BiletFlow Demo Event",
@@ -191,7 +191,7 @@ EVENTS = (
         0,
         300,
         11,
-        organizer_email="city.organizer@example.com",
+        organizer_email="city@example.com",
     ),
     EventSeed(
         "Indie Music Open Air",
@@ -512,7 +512,7 @@ def seed() -> None:
     now = datetime.now(UTC)
     password_hash = hash_password(DEMO_PASSWORD)
     guest_users = tuple(
-        (f"guest{index:02d}.demo@example.com", name, ["attendee"])
+        (f"guest{index:02d}@example.com", name, ["attendee"])
         for index, name in enumerate(GUEST_NAMES, start=1)
     )
     all_users = (*CORE_USERS, *guest_users)
@@ -521,14 +521,14 @@ def seed() -> None:
             email: upsert_user(db, email, full_name, roles, password_hash)
             for email, full_name, roles in all_users
         }
-        demo_attendee = users["attendee.demo@example.com"]
-        staff = users["staff.demo@example.com"]
+        demo_attendee = users["attendee@example.com"]
+        staff = users["staff@example.com"]
         guests = [users[email] for email, _, _ in guest_users]
         created_registrations = 0
         demo_campaign = None
         for spec in EVENTS:
             event, general = upsert_event(db, spec, users, now)
-            if spec.organizer_email == "organizer.demo@example.com":
+            if spec.organizer_email == "organizer@example.com":
                 ensure_staff_assignment(db, event, staff)
                 if demo_campaign is None and spec.price_minor > 0 and spec.status == "published":
                     demo_campaign = ensure_demo_campaign(db, event, now)

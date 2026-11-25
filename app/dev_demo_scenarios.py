@@ -34,13 +34,13 @@ from app.tickets.models import Ticket  # noqa: E402
 from app.users.models import User  # noqa: E402
 
 MARKER_CODE = "EARLYBIRD1"
-SHOWCASE_EVENT = "Almaty Jazz Night"  # paid, published, owned by organizer.demo, staff assigned
-FREE_EVENT = "Startup Pitch Night"  # free, published, owned by organizer.demo
-REPORTED_EVENT = "Astana Football Derby"  # owned by city.organizer
-SUSPENDED_EVENT = "Kazakh Design Expo"  # owned by city.organizer
+SHOWCASE_EVENT = "Almaty Jazz Night"  # paid, published, owned by organizer, staff assigned
+FREE_EVENT = "Startup Pitch Night"  # free, published, owned by organizer
+REPORTED_EVENT = "Astana Football Derby"  # owned by city
+SUSPENDED_EVENT = "Kazakh Design Expo"  # owned by city
 EXTRA_USERS = (
-    ("applicant.demo@example.com", "Demo Organizer Applicant", ["attendee"]),
-    ("suspended.demo@example.com", "Demo Suspended User", ["attendee"]),
+    ("applicant@example.com", "Demo Organizer Applicant", ["attendee"]),
+    ("suspended@example.com", "Demo Suspended User", ["attendee"]),
 )
 
 API = get_settings().app_api_v1_prefix
@@ -143,7 +143,7 @@ def approve_seeded_paid_events() -> int:
     now = datetime.now(UTC)
     approved = 0
     with SessionLocal() as db:
-        admin = db.scalar(select(User).where(User.email == "admin.demo@example.com"))
+        admin = db.scalar(select(User).where(User.email == "admin@example.com"))
         events = db.scalars(
             select(Event)
             .join(TicketType, TicketType.event_id == Event.id)
@@ -186,12 +186,12 @@ def backdate_orders() -> int:
 
 def build() -> dict:
     org, staff, admin = (
-        "organizer.demo@example.com",
-        "staff.demo@example.com",
-        "admin.demo@example.com",
+        "organizer@example.com",
+        "staff@example.com",
+        "admin@example.com",
     )
-    me = "attendee.demo@example.com"
-    guests = [f"guest{i:02d}.demo@example.com" for i in range(1, 21)]
+    me = "attendee@example.com"
+    guests = [f"guest{i:02d}@example.com" for i in range(1, 21)]
     jazz, free = event_id(SHOWCASE_EVENT), event_id(FREE_EVENT)
     jazz_types = ticket_types(jazz)
     general, vip = jazz_types["General admission"], jazz_types["VIP"]
@@ -306,7 +306,7 @@ def build() -> dict:
     call(
         "POST",
         "/organizer-applications",
-        "applicant.demo@example.com",
+        "applicant@example.com",
         json={
             "contact_name": "Demo Organizer Applicant",
             "organization_name": "NU Robotics Club",
@@ -316,7 +316,7 @@ def build() -> dict:
     )
 
     # 8. Admin moderation: a suspended user and an event with paid sales suspended.
-    users = call("GET", "/admin/users", admin, params={"q": "suspended.demo"})
+    users = call("GET", "/admin/users", admin, params={"q": "suspended"})
     users = users["items"] if isinstance(users, dict) else users
     call(
         "POST",
@@ -330,17 +330,17 @@ def build() -> dict:
 
 def cheat_sheet(out: dict | None) -> None:
     print(f"\n=== Demo scenarios (password for every account: {DEMO_PASSWORD}) ===")
-    print(f"Showcase event: '{SHOWCASE_EVENT}' (organizer.demo, staff.demo assigned)")
+    print(f"Showcase event: '{SHOWCASE_EVENT}' (organizer, staff assigned)")
     print("  Promo BILETFLOW20 (20%): has real redemptions -> organizer Campaigns/analytics")
     print(f"  Promo {MARKER_CODE} (fixed 2 000 KZT, 1 use): already used -> shows 'exhausted'")
     print("  Includes VIP/multi-ticket orders, 1 failed payment, 1 abandoned checkout,")
     print("  1 refund, ~8 check-ins, 1 reversed check-in, an event-update notification.")
     if out:
-        print("attendee.demo@example.com tickets for scanner states (open at /tickets):")
+        print("attendee@example.com tickets for scanner states (open at /tickets):")
         for state, tid in out["tickets"].items():
             print(f"  {state:32} {tid}")
-    print("Admin queues (admin.demo): pending organizer application from applicant.demo,")
-    print(f"  1 dispute, 1 report on '{REPORTED_EVENT}', suspended user suspended.demo,")
+    print("Admin queues (admin): pending organizer application from applicant,")
+    print(f"  1 dispute, 1 report on '{REPORTED_EVENT}', suspended user suspended,")
     print(f"  paid sales suspended on '{SUSPENDED_EVENT}', 5 paid-sales review applications.")
     print("Campaign-QR rejection: scan the purple campaign QR with the staff app -> rejected.")
 
@@ -355,7 +355,7 @@ def main() -> None:
         done = db.scalar(
             select(OrganizerApplication.id)
             .join(User, User.id == OrganizerApplication.user_id)
-            .where(User.email == "applicant.demo@example.com")
+            .where(User.email == "applicant@example.com")
         )
     if done:
         print("Demo scenarios already exist; nothing created.")

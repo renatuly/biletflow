@@ -19,9 +19,9 @@ from app.events.service import audit
 from app.tickets.models import TicketType
 from app.users.models import User
 
-PASSWORD = "DemoPass123!"
-ORGANIZER_EMAIL = "paid.organizer.demo@example.com"
-ADMIN_EMAIL = "admin.demo@example.com"
+PASSWORD = "demo1234"
+ORGANIZER_EMAIL = "paid@example.com"
+ADMIN_EMAIL = "admin@example.com"
 SAMPLES = (
     ("jazz", "[Demo] Almaty Evening Jazz", "music", "Almaty", "pending_review", 250000, 120),
     ("tech", "[Demo] Astana Tech Forum", "tech", "Astana", "pending_review", 800000, 200),
@@ -168,7 +168,7 @@ def seed():
             created += 1
     print(f"Paid-event samples ready: {created} added, {len(SAMPLES) - created} preserved.")
     print(f"Admin: {ADMIN_EMAIL}; organizer: {ORGANIZER_EMAIL}")
-    print("New demo accounts use DemoPass123!; existing passwords are unchanged.")
+    print("New demo accounts use demo1234; existing passwords are unchanged.")
 
 
 if __name__ == "__main__":
