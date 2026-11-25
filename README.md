@@ -29,14 +29,14 @@ python -m app.dev_reset_seed --replace-local
 
 The command verifies a separate database, backs up the current database, then
 replaces its contents. It requires an existing development SQLite database and
-never resets hosted/production data. All demo accounts use `DemoPass123!`.
+never resets hosted/production data. All demo accounts use `demo1234`.
 See [Demo walkthrough](docs/DEMO_WALKTHROUGH.md) for accounts and the full journey.
 Sign out and sign back in after reset. The local `demo_seed_manifest.json` contains
 scenario IDs, the private invitation code and the backup path. Legacy additive
 seed scripts are not needed for this dataset.
 
 For the deployed site, `app.demo_accounts` creates only the four login accounts
-(`admin.demo`, `organizer.demo`, `attendee.demo`, `staff.demo` at `example.com`) and
+(`admin`, `organizer`, `attendee`, `staff` at `example.com`) and
 works in production. The password comes from `DEMO_ACCOUNTS_PASSWORD` (12+ characters
 in production):
 
@@ -46,7 +46,7 @@ DEMO_ACCOUNTS_PASSWORD='...' python -m app.demo_accounts [--reset-passwords]
 
 On Render (no shell on the free tier), set `DEMO_ACCOUNTS_PASSWORD` on the service
 instead: the API creates any missing demo accounts at startup and never overwrites
-existing passwords. Assign `staff.demo` to an event from the organizer's event page
+existing passwords. Assign `staff` to an event from the organizer's event page
 (Event staff) so it can check in tickets in the mobile app.
 
 For PostgreSQL-based demonstration deployment of the API and the web app (the

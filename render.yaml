@@ -33,7 +33,7 @@ services:
       - key: EMAIL_FROM_NAME
         value: BiletFlow
       # Optional, 12+ characters: when set, the API creates the four demo accounts
-      # (admin/organizer/attendee/staff .demo@example.com) at startup if missing.
+      # (admin/organizer/attendee/staff@example.com) at startup if missing.
       - key: DEMO_ACCOUNTS_PASSWORD
         sync: false
 

@@ -13,7 +13,7 @@ with `APP_ENV=development` and a SQLite file. It does not reset hosted databases
 The target database must already exist; run the API once to initialize a new one.
 Legacy additive seed commands are not needed for this dataset.
 
-All accounts use **DemoPass123!**. Sign out and sign back in after resetting;
+All accounts use **demo1234**. Sign out and sign back in after resetting;
 previous sessions refer to deleted users. The web and mobile clients must point to
 this same local backend to see the same demo. Every date is relative to reset time.
 The live event lasts another three hours; the pending checkout lasts 15 minutes.
@@ -26,20 +26,20 @@ Notifications and support messages persist in the database.
 
 | Account | Demo starting point |
 |---|---|
-| attendee.demo@example.com | Amina: bookings, refunds, cancelled tickets, ticket history, messages, reports and disputes |
-| organizer.demo@example.com | Daniyar: event catalogue, analytics, staff, support, campaigns, reviews and payouts |
-| staff.demo@example.com | Miras: check-in only, assigned events and attendee rosters |
-| support.demo@example.com | Dana: assigned attendee conversations; no financial or check-in permissions |
-| admin.demo@example.com | Aliya: reviews, moderation, platform inbox, users, settings and simulated payouts |
-| city.organizer.demo@example.com | A separate organizer for ownership and permission boundaries |
-| new.attendee.demo@example.com | Empty attendee history for a fresh browsing and booking journey |
-| applicant.demo@example.com | Pending organizer application ready for admin approval |
-| rejected.applicant.demo@example.com | Rejected application for the correction/resubmission journey |
-| unverified.demo@example.com | Email verification pending |
-| suspended.demo@example.com | Suspended account for the admin restore journey |
+| attendee@example.com | Amina: bookings, refunds, cancelled tickets, ticket history, messages, reports and disputes |
+| organizer@example.com | Daniyar: event catalogue, analytics, staff, support, campaigns, reviews and payouts |
+| staff@example.com | Miras: check-in only, assigned events and attendee rosters |
+| support@example.com | Dana: assigned attendee conversations; no financial or check-in permissions |
+| admin@example.com | Aliya: reviews, moderation, platform inbox, users, settings and simulated payouts |
+| city@example.com | A separate organizer for ownership and permission boundaries |
+| new@example.com | Empty attendee history for a fresh browsing and booking journey |
+| applicant@example.com | Pending organizer application ready for admin approval |
+| rejected@example.com | Rejected application for the correction/resubmission journey |
+| unverified@example.com | Email verification pending |
+| suspended@example.com | Suspended account for the admin restore journey |
 
-There are also 24 synthetic guest accounts at `guest01.fresh.demo@example.com`
-through `guest24.fresh.demo@example.com`, with the same password.
+There are also 24 synthetic guest accounts at `guest01@example.com`
+through `guest24@example.com`, with the same password.
 
 ## Attendee demonstration
 
