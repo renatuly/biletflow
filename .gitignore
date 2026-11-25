@@ -9,3 +9,7 @@ htmlcov/
 *.db
 *.egg-info/
 uv.lock
+
+*.db.before-demo-*.bak
+
+demo_seed_manifest.json

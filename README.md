@@ -20,16 +20,20 @@ Copy `.env.example` to `.env` before changing local settings. The API will be
 available at `http://127.0.0.1:8000`, with interactive
 documentation at `/docs`.
 
-To create an idempotent local dataset with attendee, organizer, check-in staff,
-and administrator accounts, multiple event categories and venues, ticket types,
-registrations, revenue, and attendee ticket history, run:
+To replace all local demo data with fresh accounts, 25 events, orders, tickets,
+messages, campaigns, reviews and role-specific scenarios, stop the API and run:
 
 ```bash
-python -m app.dev_seed
+python -m app.dev_reset_seed --replace-local
 ```
 
-All demo accounts use `DemoPass123!`; their email addresses are printed by the
-command. The seed refuses to run when `APP_ENV=production`.
+The command verifies a separate database, backs up the current database, then
+replaces its contents. It requires an existing development SQLite database and
+never resets hosted/production data. All demo accounts use `DemoPass123!`.
+See [Demo walkthrough](docs/DEMO_WALKTHROUGH.md) for accounts and the full journey.
+Sign out and sign back in after reset. The local `demo_seed_manifest.json` contains
+scenario IDs, the private invitation code and the backup path. Legacy additive
+seed scripts are not needed for this dataset.
 
 For the deployed site, `app.demo_accounts` creates only the four login accounts
 (`admin.demo`, `organizer.demo`, `attendee.demo`, `staff.demo` at `example.com`) and
